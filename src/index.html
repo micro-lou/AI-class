@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>课程表管理</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>📚 课程表管理系统</h1>
+
+        <div class="form-section">
+            <h2>添加课程</h2>
+            <form id="course-form">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="course-name">课程名称</label>
+                        <input type="text" id="course-name" placeholder="如：高等数学" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="teacher">教师</label>
+                        <input type="text" id="teacher" placeholder="如：张老师" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="location">地点</label>
+                        <input type="text" id="location" placeholder="如：教学楼 A101" required>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="weekday">星期</label>
+                        <select id="weekday" required>
+                            <option value="">请选择</option>
+                            <option value="1">星期一</option>
+                            <option value="2">星期二</option>
+                            <option value="3">星期三</option>
+                            <option value="4">星期四</option>
+                            <option value="5">星期五</option>
+                            <option value="6">星期六</option>
+                            <option value="7">星期日</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="section">节次</label>
+                        <select id="section" required>
+                            <option value="">请选择</option>
+                            <option value="1">第 1 节</option>
+                            <option value="2">第 2 节</option>
+                            <option value="3">第 3 节</option>
+                            <option value="4">第 4 节</option>
+                            <option value="5">第 5 节</option>
+                            <option value="6">第 6 节</option>
+                            <option value="7">第 7 节</option>
+                            <option value="8">第 8 节</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="color">颜色</label>
+                        <input type="color" id="color" value="#4a90e2">
+                    </div>
+                </div>
+
+                <div class="button-row">
+                    <button type="submit" class="btn btn-primary">➕ 添加课程</button>
+                    <button type="button" id="clear-btn" class="btn btn-danger">🗑 清空所有课程</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="table-section">
+            <h2>我的课程表</h2>
+            <div class="table-wrapper">
+                <table id="schedule-table">
+                    <thead>
+                        <tr>
+                            <th>节次</th>
+                            <th>星期一</th>
+                            <th>星期二</th>
+                            <th>星期三</th>
+                            <th>星期四</th>
+                            <th>星期五</th>
+                            <th>星期六</th>
+                            <th>星期日</th>
+                        </tr>
+                    </thead>
+                    <tbody id="schedule-body">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,232 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    padding: 30px 20px;
+    color: #333;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+    padding: 30px 40px;
+}
+
+h1 {
+    text-align: center;
+    color: #2c3e50;
+    margin-bottom: 30px;
+    font-size: 28px;
+    padding-bottom: 15px;
+    border-bottom: 2px solid #e8e8e8;
+}
+
+h2 {
+    color: #2c3e50;
+    margin-bottom: 18px;
+    font-size: 20px;
+}
+
+.form-section {
+    background: #f8f9fa;
+    padding: 25px;
+    border-radius: 12px;
+    margin-bottom: 30px;
+}
+
+.form-row {
+    display: flex;
+    gap: 18px;
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+}
+
+.form-group {
+    flex: 1;
+    min-width: 180px;
+    display: flex;
+    flex-direction: column;
+}
+
+.form-group label {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: #555;
+}
+
+.form-group input,
+.form-group select {
+    padding: 10px 12px;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    font-size: 14px;
+    background: #ffffff;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+    outline: none;
+    border-color: #4a90e2;
+    box-shadow: 0 0 0 3px rgba(74, 144, 226, 0.15);
+}
+
+.form-group input[type="color"] {
+    height: 40px;
+    padding: 4px;
+    cursor: pointer;
+}
+
+.button-row {
+    display: flex;
+    gap: 12px;
+    margin-top: 10px;
+}
+
+.btn {
+    padding: 10px 24px;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.2s, opacity 0.2s;
+}
+
+.btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.btn:active {
+    transform: translateY(0);
+}
+
+.btn-primary {
+    background: #4a90e2;
+    color: #ffffff;
+}
+
+.btn-primary:hover {
+    background: #357abd;
+}
+
+.btn-danger {
+    background: #e74c3c;
+    color: #ffffff;
+}
+
+.btn-danger:hover {
+    background: #c0392b;
+}
+
+.table-section {
+    background: #ffffff;
+}
+
+.table-wrapper {
+    overflow-x: auto;
+    border-radius: 10px;
+    border: 1px solid #e8e8e8;
+}
+
+#schedule-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 800px;
+}
+
+#schedule-table th,
+#schedule-table td {
+    border: 1px solid #e8e8e8;
+    padding: 10px;
+    text-align: center;
+    vertical-align: middle;
+}
+
+#schedule-table thead th {
+    background: linear-gradient(135deg, #4a90e2, #5a9fea);
+    color: #ffffff;
+    font-weight: 600;
+    padding: 14px 10px;
+    font-size: 15px;
+}
+
+#schedule-table tbody tr {
+    height: 80px;
+}
+
+#schedule-table tbody tr:nth-child(even) {
+    background: #fafbfc;
+}
+
+#schedule-table tbody td:first-child {
+    background: #f0f4f8;
+    font-weight: 600;
+    color: #2c3e50;
+    font-size: 15px;
+    width: 80px;
+}
+
+.course-cell {
+    padding: 12px 8px;
+    border-radius: 8px;
+    color: #ffffff;
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 60px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    word-break: break-all;
+    text-align: center;
+}
+
+.course-cell .course-name {
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 4px;
+}
+
+.course-cell .course-info {
+    font-size: 12px;
+    opacity: 0.95;
+}
+
+.empty-cell {
+    color: #c0c4cc;
+    font-size: 12px;
+}
+
+@media (max-width: 768px) {
+    .container {
+        padding: 20px 18px;
+    }
+
+    h1 {
+        font-size: 22px;
+    }
+
+    .form-row {
+        flex-direction: column;
+    }
+
+    .button-row {
+        flex-direction: column;
+    }
+
+    .btn {
+        width: 100%;
+    }
+}
