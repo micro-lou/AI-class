@@ -5,11 +5,13 @@
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     min-height: 100vh;
     padding: 30px 20px;
     color: #333;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-font-smoothing: antialiased;
 }
 
 .container {
@@ -19,6 +21,7 @@ body {
     border-radius: 16px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
     padding: 30px 40px;
+    overflow: hidden;
 }
 
 h1 {
@@ -57,6 +60,14 @@ h2 {
     flex-direction: column;
 }
 
+.mobile-hint {
+    display: none;
+    font-size: 12px;
+    color: #888;
+    text-align: center;
+    margin-top: 6px;
+}
+
 .form-group label {
     font-size: 14px;
     font-weight: 600;
@@ -72,6 +83,15 @@ h2 {
     font-size: 14px;
     background: #ffffff;
     transition: border-color 0.2s, box-shadow 0.2s;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.form-group select {
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%234a90e2' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 34px;
 }
 
 .form-group input:focus,
@@ -85,6 +105,109 @@ h2 {
     height: 40px;
     padding: 4px;
     cursor: pointer;
+}
+
+.form-group textarea {
+    padding: 12px 14px;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    background: #fafbfc;
+    resize: vertical;
+    min-height: 120px;
+    line-height: 1.6;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.form-group textarea:focus {
+    outline: none;
+    border-color: #4a90e2;
+    box-shadow: 0 0 0 3px rgba(74, 144, 226, 0.15);
+    background: #ffffff;
+}
+
+/* ============= 导入课表专属样式 ============= */
+.import-section {
+    border: 2px dashed #4a90e2;
+    background: #f0f6ff;
+}
+
+.import-section h2 {
+    color: #2563eb;
+}
+
+.import-tips {
+    background: #ffffff;
+    border-left: 4px solid #4a90e2;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    color: #475569;
+    border-radius: 4px;
+    line-height: 1.7;
+}
+
+.import-tips kbd {
+    display: inline-block;
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-bottom-width: 2px;
+    padding: 1px 6px;
+    font-size: 12px;
+    font-family: inherit;
+    border-radius: 4px;
+    color: #334155;
+}
+
+.import-result {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    line-height: 1.6;
+    display: none;
+}
+
+.import-result.show {
+    display: block;
+}
+
+.import-result.success {
+    background: #ecfdf5;
+    border-left: 4px solid #10b981;
+    color: #065f46;
+}
+
+.import-result.warning {
+    background: #fffbeb;
+    border-left: 4px solid #f59e0b;
+    color: #92400e;
+}
+
+.import-result.error {
+    background: #fef2f2;
+    border-left: 4px solid #ef4444;
+    color: #991b1b;
+}
+
+.import-result .parsed-list {
+    margin-top: 8px;
+    padding-left: 20px;
+    font-size: 12px;
+}
+
+.import-result .parsed-list li {
+    margin: 2px 0;
+}
+
+.btn-secondary {
+    background: #64748b;
+    color: #ffffff;
+}
+
+.btn-secondary:hover {
+    background: #475569;
 }
 
 .button-row {
@@ -138,6 +261,25 @@ h2 {
     overflow-x: auto;
     border-radius: 10px;
     border: 1px solid #e8e8e8;
+    -webkit-overflow-scrolling: touch;
+    position: relative;
+}
+
+.table-wrapper::-webkit-scrollbar {
+    height: 8px;
+}
+
+.table-wrapper::-webkit-scrollbar-thumb {
+    background: #c5cdd6;
+    border-radius: 4px;
+}
+
+.scroll-hint {
+    display: none;
+    font-size: 12px;
+    color: #888;
+    text-align: center;
+    margin-top: 10px;
 }
 
 #schedule-table {
@@ -160,6 +302,9 @@ h2 {
     font-weight: 600;
     padding: 14px 10px;
     font-size: 15px;
+    position: sticky;
+    top: 0;
+    z-index: 2;
 }
 
 #schedule-table tbody tr {
@@ -176,6 +321,9 @@ h2 {
     color: #2c3e50;
     font-size: 15px;
     width: 80px;
+    position: sticky;
+    left: 0;
+    z-index: 1;
 }
 
 .course-cell {
@@ -209,24 +357,169 @@ h2 {
     font-size: 12px;
 }
 
+/* ============= 平板 / 大手机 ============= */
 @media (max-width: 768px) {
+    body {
+        padding: 15px 10px;
+    }
+
     .container {
-        padding: 20px 18px;
+        padding: 20px 16px;
+        border-radius: 12px;
     }
 
     h1 {
         font-size: 22px;
+        margin-bottom: 20px;
+        padding-bottom: 10px;
+    }
+
+    h2 {
+        font-size: 17px;
+        margin-bottom: 12px;
+    }
+
+    .form-section {
+        padding: 16px;
+        margin-bottom: 20px;
+    }
+
+    .form-section.import-section {
+        padding: 14px;
+    }
+
+    .import-tips {
+        font-size: 12px;
+        padding: 8px 10px;
+        line-height: 1.7;
+    }
+
+    .form-group textarea {
+        font-size: 14px;
+        min-height: 140px;
     }
 
     .form-row {
         flex-direction: column;
+        gap: 12px;
+        margin-bottom: 12px;
+    }
+
+    .form-group {
+        min-width: 0;
+    }
+
+    .form-group label {
+        font-size: 13px;
+        margin-bottom: 4px;
+    }
+
+    .form-group input,
+    .form-group select {
+        font-size: 16px;  /* iOS 上 <16px 会自动放大，保持 16px 体验好 */
+        padding: 12px 14px;
+    }
+
+    .form-group input[type="color"] {
+        height: 48px;
     }
 
     .button-row {
         flex-direction: column;
+        gap: 10px;
     }
 
     .btn {
         width: 100%;
+        padding: 13px 20px;
+        font-size: 15px;
     }
+
+    .scroll-hint {
+        display: block;
+    }
+
+    /* 移动端表格优化 */
+    #schedule-table {
+        min-width: 640px;
+    }
+
+    #schedule-table thead th {
+        padding: 10px 6px;
+        font-size: 13px;
+    }
+
+    #schedule-table tbody tr {
+        height: 60px;
+    }
+
+    #schedule-table tbody td {
+        padding: 6px 4px;
+        font-size: 12px;
+    }
+
+    #schedule-table tbody td:first-child {
+        width: 56px;
+        font-size: 13px;
+    }
+
+    .course-cell {
+        padding: 6px 4px;
+        font-size: 12px;
+        min-height: 48px;
+        line-height: 1.4;
+    }
+
+    .course-cell .course-name {
+        font-size: 13px;
+        margin-bottom: 2px;
+    }
+
+    .course-cell .course-info {
+        font-size: 11px;
+    }
+
+    /* 移动端隐藏次要信息，让课程格更清晰 */
+    .course-cell .course-info.hide-on-mobile {
+        display: none;
+    }
+}
+
+/* ============= 超小屏（iPhone SE / 小安卓） ============= */
+@media (max-width: 480px) {
+    h1 {
+        font-size: 19px;
+    }
+
+    .container {
+        padding: 15px 12px;
+    }
+
+    .form-section {
+        padding: 13px;
+    }
+
+    .form-group input,
+    .form-group select {
+        font-size: 16px;
+        padding: 11px 12px;
+    }
+
+    #schedule-table {
+        min-width: 560px;
+    }
+
+    /* 超小屏下表头精简显示：一/二/三 ... */
+    #schedule-table thead th .full-text {
+        display: none;
+    }
+
+    #schedule-table thead th .short-text {
+        display: inline;
+    }
+}
+
+/* 默认显示完整星期文字 */
+#schedule-table thead th .short-text {
+    display: none;
 }

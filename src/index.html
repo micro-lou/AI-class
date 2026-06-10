@@ -10,8 +10,26 @@
     <div class="container">
         <h1>📚 课程表管理系统</h1>
 
+        <!-- ============ 导入课表（从教务处） ============ -->
+        <div class="form-section import-section">
+            <h2>📥 从教务处导入课表</h2>
+            <p class="import-tips">
+                <strong>使用方法：</strong>登录学校教务处 → 打开 <em>"我的课表"</em> 页面 → 按 <kbd>Ctrl+A</kbd> 全选 → <kbd>Ctrl+C</kbd> 复制 → 粘贴到下方框内 → 点击 <strong>解析导入</strong>。
+            </p>
+            <div class="form-group">
+                <label for="import-text">粘贴教务处课表内容（HTML 或文字）</label>
+                <textarea id="import-text" rows="6" placeholder="把从教务处复制的课表内容粘贴到这里，支持常见的中文课表格式，例如：&#10;高等数学&#9;张老师&#9;教学楼A101&#9;星期一&#9;第1-2节"></textarea>
+            </div>
+            <div class="button-row">
+                <button type="button" id="parse-btn" class="btn btn-primary">🔍 解析并导入</button>
+                <button type="button" id="clear-import-btn" class="btn btn-secondary">清空文本</button>
+                <button type="button" id="demo-btn" class="btn btn-secondary">📝 示例数据</button>
+            </div>
+            <div id="import-result" class="import-result"></div>
+        </div>
+
         <div class="form-section">
-            <h2>添加课程</h2>
+            <h2>✏️ 手动添加课程</h2>
             <form id="course-form">
                 <div class="form-row">
                     <div class="form-group">
@@ -76,18 +94,18 @@
                     <thead>
                         <tr>
                             <th>节次</th>
-                            <th>星期一</th>
-                            <th>星期二</th>
-                            <th>星期三</th>
-                            <th>星期四</th>
-                            <th>星期五</th>
-                            <th>星期六</th>
-                            <th>星期日</th>
+                            <th><span class="full-text">星期一</span><span class="short-text">一</span></th>
+                            <th><span class="full-text">星期二</span><span class="short-text">二</span></th>
+                            <th><span class="full-text">星期三</span><span class="short-text">三</span></th>
+                            <th><span class="full-text">星期四</span><span class="short-text">四</span></th>
+                            <th><span class="full-text">星期五</span><span class="short-text">五</span></th>
+                            <th><span class="full-text">星期六</span><span class="short-text">六</span></th>
+                            <th><span class="full-text">星期日</span><span class="short-text">日</span></th>
                         </tr>
                     </thead>
-                    <tbody id="schedule-body">
-                    </tbody>
+                    <tbody id="schedule-body"></tbody>
                 </table>
+                <p class="scroll-hint">← 左右滑动查看完整课表 →</p>
             </div>
         </div>
     </div>
