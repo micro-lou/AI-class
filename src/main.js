@@ -106,9 +106,7 @@ function parseSections(str) {
     while ((match = singleRegex.exec(s)) !== null) {
         const n = parseInt(match[1], 10);
         if (n >= 1 && n <= 12 && !results.includes(n)) {
-            // 检查这个数字是否已经被 range 覆盖
-            const alreadyCovered = results.some(r => true);
-            // 若没有 range 匹配才单独加入
+            results.push(n);
         }
     }
     // 如果 range 没匹配到，尝试找所有数字作为节次
@@ -498,4 +496,192 @@ window.addEventListener('resize', function () {
     resizeTimer = setTimeout(function () {
         renderCourses();
     }, 200);
+});
+
+// ============================================================
+//      ⬇️  教务处课表导入 —— 按钮事件（缺失部分已补上）
+// ============================================================
+
+/**
+ * 🔍 解析并导入
+ */
+parseBtn.addEventListener('click', function () {
+    const rawText = importTextInput.value;
+    if (!trim(rawText)) {
+        showImportResult('error', '❌ 请先在上面的文本框中粘贴教务处课表内容！');
+        return;
+    }
+    const parsed = parseCourseText(rawText);
+    if (parsed.length === 0) {
+        showImportResult('warning', '⚠️ 没有解析到任何课程。请检查粘贴的内容，或点击"📝 示例数据"测试。');
+        return;
+    }
+    const { added, skipped } = mergeCourses(parsed);
+    saveCoursesToStorage();
+    renderCourses();
+    if (added.length === 0) {
+        showImportResult('warning', `⚠️ 解析到 ${parsed.length} 门课程，但全部与已有课程时间冲突，未添加。`);
+    } else if (skipped.length > 0) {
+        showImportResult('success', `✅ 成功导入 ${added.length} 门课程（跳过 ${skipped.length} 门冲突课程`, added);
+    } else {
+        showImportResult('success', `✅ 成功导入 ${added.length} 门课程！`, added);
+    }
+});
+
+/**
+ * 清空输入文本 + 结果提示
+ */
+clearImportBtn.addEventListener('click', function () {
+    importTextInput.value = '';
+    importResult.className = 'import-result';
+    importResult.innerHTML = '';
+    importTextInput.focus();
+});
+
+/**
+ * 📝 载入示例数据（方便测试）
+ */
+demoBtn.addEventListener('click', function () {
+    importTextInput.value = getDemoData();
+    showImportResult('success', '📄 已载入示例数据，点击"🔍 解析并导入"试试！');
+});
+
+// ============================================================
+//      ✏️  单节课编辑 / 删除功能
+// ============================================================
+
+// ------ 弹窗相关 DOM ------
+const editModal = document.getElementById('edit-modal');
+const editNameInput = document.getElementById('edit-name');
+const editTeacherInput = document.getElementById('edit-teacher');
+const editLocationInput = document.getElementById('edit-location');
+const editWeekdaySelect = document.getElementById('edit-weekday');
+const editSectionSelect = document.getElementById('edit-section');
+const editColorInput = document.getElementById('edit-color');
+const editSaveBtn = document.getElementById('edit-save-btn');
+const editDeleteBtn = document.getElementById('edit-delete-btn');
+const editCancelBtn = document.getElementById('edit-cancel-btn');
+
+// 当前正在编辑的课程索引（-1 表示未编辑任何课程）
+let editingIndex = -1;
+
+/**
+ * 根据 weekday + section 在 courses 数组中查找对应课程的索引
+ */
+function findCourseIndex(weekday, section) {
+    return courses.findIndex(
+        (c) => c.weekday === Number(weekday) && c.section === Number(section)
+    );
+}
+
+/**
+ * 打开编辑弹窗
+ */
+function openEditModal(weekday, section) {
+    const idx = findCourseIndex(weekday, section);
+    if (idx === -1) return;
+    const c = courses[idx];
+    editingIndex = idx;
+
+    // 填入当前课程信息
+    editNameInput.value = c.name;
+    editTeacherInput.value = c.teacher;
+    editLocationInput.value = c.location;
+    editWeekdaySelect.value = String(c.weekday);
+    editSectionSelect.value = String(c.section);
+    editColorInput.value = c.color;
+
+    editModal.classList.add('show');
+    editNameInput.focus();
+    editNameInput.select();
+}
+
+/**
+ * 关闭编辑弹窗
+ */
+function closeEditModal() {
+    editModal.classList.remove('show');
+    editingIndex = -1;
+}
+
+/**
+ * 保存当前编辑：更新 courses 数组 → 保存 → 重绘
+ */
+function saveEdit() {
+    if (editingIndex === -1) return;
+
+    const name = trim(editNameInput.value);
+    const teacher = trim(editTeacherInput.value);
+    const location = trim(editLocationInput.value);
+    const weekday = Number(editWeekdaySelect.value);
+    const section = Number(editSectionSelect.value);
+    const color = editColorInput.value;
+
+    // 非空校验
+    if (!name) { alert('请输入课程名称！'); editNameInput.focus(); return; }
+    if (!teacher) { alert('请输入教师姓名！'); editTeacherInput.focus(); return; }
+    if (!location) { alert('请输入上课地点！'); editLocationInput.focus(); return; }
+
+    // 时间冲突校验：如果星期/节次变了，要检查新位置是否被占
+    const conflictIdx = findCourseIndex(weekday, section);
+    if (conflictIdx !== -1 && conflictIdx !== editingIndex) {
+        const dayNames = ['', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
+        alert(`冲突：${dayNames[weekday]} 第 ${section} 节已有其他课程，请更换时间！`);
+        return;
+    }
+
+    // 更新课程
+    courses[editingIndex] = { name, teacher, location, weekday, section, color };
+    saveCoursesToStorage();
+    renderCourses();
+    closeEditModal();
+}
+
+/**
+ * 删除当前编辑的课程
+ */
+function deleteEdit() {
+    if (editingIndex === -1) return;
+    const c = courses[editingIndex];
+    if (!confirm(`确定删除课程「${c.name}」（${c.teacher}，${c.location}）？`)) return;
+    courses.splice(editingIndex, 1);
+    saveCoursesToStorage();
+    renderCourses();
+    closeEditModal();
+}
+
+// ------ 事件绑定 ------
+
+// 事件委托：点击表格中任意课程格子 → 打开编辑弹窗
+document.addEventListener('click', function (e) {
+    const cell = e.target.closest('.course-cell');
+    if (!cell) return;
+    const td = cell.closest('td');
+    if (!td || !td.dataset.weekday || !td.dataset.section) return;
+    openEditModal(td.dataset.weekday, td.dataset.section);
+});
+
+// 弹窗内按钮
+editSaveBtn.addEventListener('click', saveEdit);
+editDeleteBtn.addEventListener('click', deleteEdit);
+editCancelBtn.addEventListener('click', closeEditModal);
+
+// 点击遮罩层（弹窗外区域）→ 关闭
+editModal.addEventListener('click', function (e) {
+    if (e.target === editModal) closeEditModal();
+});
+
+// 按 ESC → 关闭弹窗
+document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && editModal.classList.contains('show')) {
+        closeEditModal();
+    }
+    // 弹窗打开时按 Enter → 保存（仅当焦点不在多行输入区时）
+    if (e.key === 'Enter' && editModal.classList.contains('show')) {
+        const tag = (document.activeElement && document.activeElement.tagName) || '';
+        if (tag !== 'TEXTAREA') {
+            e.preventDefault();
+            saveEdit();
+        }
+    }
 });

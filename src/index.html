@@ -110,6 +110,63 @@
         </div>
     </div>
 
+    <!-- ============ 编辑课程弹窗 ============ -->
+    <div id="edit-modal" class="modal">
+        <div class="modal-content">
+            <h3>✏️ 编辑课程</h3>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="edit-name">课程名称</label>
+                    <input type="text" id="edit-name" placeholder="如：高等数学">
+                </div>
+                <div class="form-group">
+                    <label for="edit-teacher">教师</label>
+                    <input type="text" id="edit-teacher" placeholder="如：张老师">
+                </div>
+                <div class="form-group">
+                    <label for="edit-location">地点</label>
+                    <input type="text" id="edit-location" placeholder="如：教学楼 A101">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="edit-weekday">星期</label>
+                        <select id="edit-weekday">
+                            <option value="1">星期一</option>
+                            <option value="2">星期二</option>
+                            <option value="3">星期三</option>
+                            <option value="4">星期四</option>
+                            <option value="5">星期五</option>
+                            <option value="6">星期六</option>
+                            <option value="7">星期日</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-section">节次</label>
+                        <select id="edit-section">
+                            <option value="1">第 1 节</option>
+                            <option value="2">第 2 节</option>
+                            <option value="3">第 3 节</option>
+                            <option value="4">第 4 节</option>
+                            <option value="5">第 5 节</option>
+                            <option value="6">第 6 节</option>
+                            <option value="7">第 7 节</option>
+                            <option value="8">第 8 节</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-color">颜色</label>
+                        <input type="color" id="edit-color" value="#4a90e2">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="edit-delete-btn" class="btn btn-danger">🗑 删除</button>
+                <button type="button" id="edit-cancel-btn" class="btn btn-secondary">取消</button>
+                <button type="button" id="edit-save-btn" class="btn btn-primary">💾 保存</button>
+            </div>
+        </div>
+    </div>
+
     <script src="main.js"></script>
 </body>
 </html>
