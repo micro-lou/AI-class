@@ -29,6 +29,7 @@ import re
 import sys
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 
@@ -163,6 +164,8 @@ def load_json(path):
             continue
         except json.JSONDecodeError as e:
             return None, f'json解析失败：{e}'
+        except OSError as e:
+            return None, f'json读取失败：{e}'
     return None, 'json解析失败：无法识别文件编码'
 
 
@@ -286,21 +289,22 @@ def check_json(path, cfg):
 
 # ============================ 文件夹遍历与汇总 ============================
 
-def process_dir(dirpath, cfg, log):
+def process_dir(dirpath, cfg, log, pool=None, stop_event=None):
     """处理单个文件夹：jpg/json 对应检查 + 逐个检查配对成功的 json
-    返回报错列表 [(文件地址, 类型, 细节)]"""
+    返回报错列表 [(文件地址, 类型, 细节)]。
+    pool: 传入线程池时并行解析 json（结果与日志仍按文件顺序输出）"""
     errors = []
     jpgs, jsons = {}, {}
-    for name in os.listdir(dirpath):
-        full = os.path.join(dirpath, name)
-        if not os.path.isfile(full):
-            continue
-        stem, ext = os.path.splitext(name)
-        ext = ext.lower()
-        if ext == '.jpg':
-            jpgs[stem] = full
-        elif ext == '.json':
-            jsons[stem] = full
+    with os.scandir(dirpath) as it:
+        for entry in it:
+            if not entry.is_file():
+                continue
+            stem, ext = os.path.splitext(entry.name)
+            ext = ext.lower()
+            if ext == '.jpg':
+                jpgs[stem] = entry.path
+            elif ext == '.json':
+                jsons[stem] = entry.path
 
     n_checked = 0
 
@@ -314,16 +318,21 @@ def process_dir(dirpath, cfg, log):
     else:
         targets = sorted(jsons)
 
-    for stem in targets:
+    paths = [jsons[s] for s in targets]
+    if pool is not None and len(paths) > 1:
+        results = pool.map(lambda p: check_json(p, cfg), paths)
+    else:
+        results = [check_json(p, cfg) for p in paths]
+
+    for jpath, file_errors in zip(paths, results):
+        if stop_event is not None and stop_event.is_set():
+            break
         n_checked += 1
-        jpath = jsons[stem]
-        file_errors = check_json(jpath, cfg)
+        # 检测正常的文件不打日志，日志框只显示报错信息
         if file_errors:
             for etype, detail in file_errors:
                 errors.append((jpath, etype, detail))
                 log(f'  ✗ {os.path.basename(jpath)} ← {etype}：{detail}')
-        else:
-            log(f'  ✓ {os.path.basename(jpath)}')
     return errors, n_checked
 
 
@@ -333,16 +342,17 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
     n_dirs = 0
     n_json = 0
     n_deleted = 0
-    log(f'[信息] 内置国标箱型代码 {len(TYPE_CODES)} 个')
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        if stop_event.is_set():
-            break
-        n_dirs += 1
-        log(f'[扫描] {dirpath}')
-        errs, n = process_dir(dirpath, cfg, log)
-        all_errors.extend(errs)
-        n_json += n
+    # 大批量小文件以读盘为主，多线程并行解析 json 可显著提速
+    max_workers = min(8, os.cpu_count() or 1)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for dirpath, dirnames, filenames in os.walk(root):
+            if stop_event.is_set():
+                break
+            n_dirs += 1
+            errs, n = process_dir(dirpath, cfg, log, pool, stop_event)
+            all_errors.extend(errs)
+            n_json += n
 
     # 删除空文件夹（自底向上，删掉子文件夹后父文件夹若变空也一并删除）
     if cfg['cleanup'] and not stop_event.is_set():
@@ -393,6 +403,11 @@ def write_excel(path, errors):
 # ============================ 图形界面 ============================
 
 DESKTOP = os.path.join(os.path.expanduser('~'), 'Desktop')
+
+# 大批量检测时的界面保护：日志区最多保留行数（超出删最旧的）、
+# 单次 _poll 最多刷入条数（其余留给下一轮，避免长时间霸占 UI 线程）
+MAX_LOG_LINES = 5000
+LOG_BATCH_LIMIT = 300
 
 CHECK_ITEMS = [
     ('pairing',   'jpg/json 文件对应检测'),
@@ -627,20 +642,31 @@ class CheckerApp:
         self.log('[信息] 已请求停止，等待当前文件处理完成…')
 
     def _poll(self):
-        try:
-            while True:
+        """每 100ms 批量取一次日志：合并为一次插入、只滚动一次，
+        并裁剪超出上限的旧行，避免大批量时逐条刷新把界面拖卡"""
+        lines = []
+        finish_args = None
+        while len(lines) < LOG_BATCH_LIMIT:
+            try:
                 msg = self.msg_queue.get_nowait()
-                if isinstance(msg, tuple):
-                    kind, payload = msg
-                    self._finish(payload if kind == '__done__' else None,
-                                None if kind == '__done__' else payload)
-                    break
-                self.log_text.config(state='normal')
-                self.log_text.insert('end', msg + '\n')
-                self.log_text.see('end')
-                self.log_text.config(state='disabled')
-        except queue.Empty:
-            pass
+            except queue.Empty:
+                break
+            if isinstance(msg, tuple):
+                kind, payload = msg
+                finish_args = (payload if kind == '__done__' else None,
+                              None if kind == '__done__' else payload)
+                break
+            lines.append(msg)
+        if lines:
+            self.log_text.config(state='normal')
+            self.log_text.insert('end', '\n'.join(lines) + '\n')
+            n_lines = int(self.log_text.index('end-1c').split('.')[0])
+            if n_lines > MAX_LOG_LINES:
+                self.log_text.delete('1.0', f'{n_lines - MAX_LOG_LINES}.0')
+            self.log_text.see('end')
+            self.log_text.config(state='disabled')
+        if finish_args is not None:
+            self._finish(*finish_args)
         self.master.after(100, self._poll)
 
     def _finish(self, summary, err):
