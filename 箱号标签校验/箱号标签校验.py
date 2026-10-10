@@ -73,7 +73,11 @@ def load_type_codes():
     try:
         with open(CONFIG_PATH, encoding='utf-8') as f:
             data = json.load(f)
-        return frozenset(str(c).strip().upper() for c in data)
+        if not isinstance(data, list):
+            return BASE_TYPE_CODES
+        # 逐条校验格式，过滤手改配置文件时可能混入的脏数据
+        return frozenset(c for c in (str(s).strip().upper() for s in data)
+                         if valid_type_code(c))
     except (OSError, json.JSONDecodeError, TypeError):
         return BASE_TYPE_CODES
 
@@ -171,9 +175,11 @@ def load_json(path):
 
 # ============================ 单个 json 检测 ============================
 
-def check_json(path, cfg):
+def check_json(path, cfg, stop_event=None):
     """检测一个 json 文件，返回报错列表 [(类型, 细节)]。
     按优先级顺序执行，命中报错即停止后续检测。"""
+    if stop_event is not None and stop_event.is_set():
+        return []                     # 已请求停止，跳过剩余文件的解析
     data, err = load_json(path)
     if err:
         return [('json解析失败', err)]
@@ -289,70 +295,89 @@ def check_json(path, cfg):
 
 # ============================ 文件夹遍历与汇总 ============================
 
-def process_dir(dirpath, cfg, log, pool=None, stop_event=None):
-    """处理单个文件夹：jpg/json 对应检查 + 逐个检查配对成功的 json
-    返回报错列表 [(文件地址, 类型, 细节)]。
-    pool: 传入线程池时并行解析 json（结果与日志仍按文件顺序输出）"""
+def scan_dirs(root, cfg, stop_event=None):
+    """遍历 root（支持多层嵌套），返回 (各目录待检 json 路径列表, 配对报错列表)。
+    先收集完所有目录再统一检测，避免逐目录等待导致并行度不足"""
+    dir_targets = []   # [[json路径, ...], ...] 按遍历顺序，每项对应一个目录
     errors = []
-    jpgs, jsons = {}, {}
-    with os.scandir(dirpath) as it:
-        for entry in it:
-            if not entry.is_file():
-                continue
-            stem, ext = os.path.splitext(entry.name)
-            ext = ext.lower()
-            if ext == '.jpg':
-                jpgs[stem] = entry.path
-            elif ext == '.json':
-                jsons[stem] = entry.path
-
-    n_checked = 0
-
-    # ---- 优先级1：jpg 与 json 一一对应 ----
-    if cfg['pairing']:
-        for stem in sorted(set(jpgs) - set(jsons)):
-            errors.append((jpgs[stem], '缺少json文件', ''))
-        for stem in sorted(set(jsons) - set(jpgs)):
-            errors.append((jsons[stem], '缺少jpg文件', ''))
-        targets = sorted(set(jpgs) & set(jsons))
-    else:
-        targets = sorted(jsons)
-
-    paths = [jsons[s] for s in targets]
-    if pool is not None and len(paths) > 1:
-        results = pool.map(lambda p: check_json(p, cfg), paths)
-    else:
-        results = [check_json(p, cfg) for p in paths]
-
-    for jpath, file_errors in zip(paths, results):
+    for dirpath, dirnames, filenames in os.walk(root):
         if stop_event is not None and stop_event.is_set():
             break
-        n_checked += 1
-        # 检测正常的文件不打日志，日志框只显示报错信息
-        if file_errors:
-            for etype, detail in file_errors:
-                errors.append((jpath, etype, detail))
-                log(f'  ✗ {os.path.basename(jpath)} ← {etype}：{detail}')
-    return errors, n_checked
+        jpgs, jsons = {}, {}
+        for name in filenames:
+            stem, ext = os.path.splitext(name)
+            ext = ext.lower()
+            if ext in ('.jpg', '.jpeg'):
+                jpgs[stem] = os.path.join(dirpath, name)
+            elif ext == '.json':
+                jsons[stem] = os.path.join(dirpath, name)
+
+        # ---- 优先级1：jpg 与 json 一一对应 ----
+        if cfg['pairing']:
+            for stem in sorted(set(jpgs) - set(jsons)):
+                errors.append((jpgs[stem], '缺少json文件', ''))
+            for stem in sorted(set(jsons) - set(jpgs)):
+                errors.append((jsons[stem], '缺少jpg文件', ''))
+            targets = sorted(set(jpgs) & set(jsons))
+        else:
+            targets = sorted(jsons)
+        dir_targets.append([jsons[s] for s in targets])
+    return dir_targets, errors
+
+
+def precheck_output(out_xlsx):
+    """检测开始前预检 Excel 输出，返回错误信息（无问题返回 None）：
+    openpyxl 是否安装、目标文件是否被 Excel 打开锁定、所在目录是否可写"""
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        return '未安装 openpyxl（pip install openpyxl），无法生成 Excel'
+    try:
+        if os.path.exists(out_xlsx):     # 已有文件被 Excel 打开时处于锁定状态
+            with open(out_xlsx, 'a'):
+                pass
+        probe = out_xlsx + '.probe'      # 同目录试写后删除，验证目录可写
+        Workbook().save(probe)
+        os.remove(probe)
+    except OSError as e:
+        return f'输出 Excel 无法写入：{e}'
+    return None
 
 
 def run_detection(root, cfg, out_xlsx, log, stop_event):
     """主流程：遍历 root，返回汇总信息 dict"""
-    all_errors = []
-    n_dirs = 0
+    # 先预检输出，避免整趟扫描跑完后才发现写不了 Excel
+    err = precheck_output(out_xlsx)
+    if err:
+        raise ValueError(err)
+
+    # 先一次性收集所有目录与 json 路径，再整体提交线程池并行解析
+    dir_targets, all_errors = scan_dirs(root, cfg, stop_event)
+    n_dirs = len(dir_targets)
+    paths = [p for targets in dir_targets for p in targets]
+
     n_json = 0
     n_deleted = 0
-
-    # 大批量小文件以读盘为主，多线程并行解析 json 可显著提速
+    # 大批量小文件以读盘为主，多线程并行解析 json 可显著提速；
+    # stop_event 传入 check_json：请求停止后尚未开始的任务直接跳过
     max_workers = min(8, os.cpu_count() or 1)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for dirpath, dirnames, filenames in os.walk(root):
-            if stop_event.is_set():
+        results = iter(pool.map(lambda p: check_json(p, cfg, stop_event), paths))
+        stopped = False
+        for targets in dir_targets:
+            if stopped:
                 break
-            n_dirs += 1
-            errs, n = process_dir(dirpath, cfg, log, pool, stop_event)
-            all_errors.extend(errs)
-            n_json += n
+            for jpath in targets:
+                if stop_event.is_set():
+                    stopped = True
+                    break
+                n_json += 1
+                file_errors = next(results)
+                # 检测正常的文件不打日志，日志框只显示报错信息
+                if file_errors:
+                    for etype, detail in file_errors:
+                        all_errors.append((jpath, etype, detail))
+                        log(f'  ✗ {os.path.basename(jpath)} ← {etype}：{detail}')
 
     # 删除空文件夹（自底向上，删掉子文件夹后父文件夹若变空也一并删除）
     if cfg['cleanup'] and not stop_event.is_set():
@@ -436,9 +461,9 @@ class CheckerApp:
         default_out = os.path.join(DESKTOP, f'报错汇总_{datetime.now():%Y%m%d_%H%M%S}.xlsx')
         self.ent_out = self._path_row(frm_paths, 1, '输出Excel：', self._pick_out)
         self.ent_out.insert(0, default_out)
-        # 是否由用户自定义了 Excel 生成地址（默认生成在桌面，可自行修改）
-        self.out_customized = False
-        self.ent_out.bind('<KeyRelease>', lambda e: setattr(self, 'out_customized', True))
+        # 最近一次自动生成的默认输出路径；输入框内容与之相同（或为空）即视为
+        # 未自定义，仍随所选文件夹自动更新，方向键等按键不会造成误判
+        self._out_default = default_out
 
         frm_checks = tk.LabelFrame(master, text='检测项开关（按优先级顺序执行，命中即停）', padx=10, pady=6)
         frm_checks.pack(fill='x', padx=10, pady=4)
@@ -477,26 +502,34 @@ class CheckerApp:
             self.ent_root.delete(0, 'end')
             self.ent_root.insert(0, d)
             # 用户未自定义过输出地址时，随所选文件夹自动更新默认值（生成在桌面）
-            if not self.out_customized:
+            cur = self.ent_out.get()
+            if not cur.strip() or cur == self._out_default:
                 name = os.path.basename(os.path.normpath(d))
                 default_out = os.path.join(
                     DESKTOP, f'{name}_报错汇总_{datetime.now():%Y%m%d_%H%M%S}.xlsx')
                 self.ent_out.delete(0, 'end')
                 self.ent_out.insert(0, default_out)
+                self._out_default = default_out
 
     def _pick_out(self):
         f = filedialog.asksaveasfilename(defaultextension='.xlsx',
                                          filetypes=[('Excel 文件', '*.xlsx')],
                                          initialdir=DESKTOP)
         if f:
+            # 用户已自行选择 Excel 生成地址（与默认值不同），之后不再自动覆盖
             self.ent_out.delete(0, 'end')
             self.ent_out.insert(0, f)
-            self.out_customized = True   # 用户已自定义 Excel 生成地址，不再自动覆盖
 
     # ==================== 箱型代码管理（增删改查） ====================
 
     def manage_codes(self):
         """箱型代码管理窗口：查（搜索/列表）、增、删、改、恢复默认"""
+        # 已打开则直接置前，避免重复开窗覆盖控件引用、导致先开窗口操作错乱
+        win = getattr(self, 'win_codes', None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            return
         win = tk.Toplevel(self.master)
         win.title('箱型代码管理（增删改查）')
         win.geometry('440x540')
@@ -532,6 +565,7 @@ class CheckerApp:
 
         win.columnconfigure(1, weight=1)
         win.rowconfigure(1, weight=1)
+        self.win_codes = win
         self._codes_refresh()
 
     def _codes_filtered(self):
@@ -549,7 +583,7 @@ class CheckerApp:
 
     def _codes_save(self, codes, ok_msg):
         ok, tip = set_type_codes(codes)
-        self.lbl_codes_status.config(text=tip if ok else tip, fg='gray' if ok else 'red')
+        self.lbl_codes_status.config(text=tip, fg='gray' if ok else 'red')
         if ok:
             self.log(f'[箱型代码] {ok_msg}：{tip}')
         self._codes_refresh()
@@ -688,6 +722,9 @@ class CheckerApp:
 # ============================ 入口 ============================
 
 def run_cli(args):
+    # 中文 Windows 控制台默认 GBK 编码，日志中的 ✓/✗ 等字符无法编码时会崩溃
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(errors='replace')
     if not os.path.isdir(args.root):
         print(f'错误：待检文件夹不存在：{args.root}')
         sys.exit(1)
@@ -696,7 +733,11 @@ def run_cli(args):
         out += '.xlsx'
     cfg = {key: True for key, _ in CHECK_ITEMS}
     stop_event = threading.Event()
-    summary = run_detection(args.root, cfg, out, print, stop_event)
+    try:
+        summary = run_detection(args.root, cfg, out, print, stop_event)
+    except ValueError as e:          # 输出预检失败（openpyxl 缺失 / 路径不可写）
+        print(f'错误：{e}')
+        sys.exit(1)
     print(f"检测完成：文件夹 {summary['dirs']} 个，json {summary['json']} 个，"
           f"报错 {summary['errors']} 条，删除空文件夹 {summary['deleted']} 个")
     print(f"结果已保存至：{summary['out']}")
