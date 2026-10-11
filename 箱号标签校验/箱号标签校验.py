@@ -9,10 +9,12 @@
      - 含 _fz / _oc 后缀的标签：开关开启时报错（不清晰 / 遮挡）；
        开关关闭时整个文件直接跳过，不做其他任何校验也不报错
      - 内容为 "," 加数字的标签不予理会
-     - 两个一组的 label 值只差一或两位 → 报错（标签不一致）
+     - 两个一组的 label 值只差一或两位 → 报错（标签不一致）；
+       相差超过两位 → 判定为两个不同的箱子，两组箱号分别检测校验位
      - 箱号缺位 / 格式不符（应为 4 字母[第4位固定U] + 6 数字 + 1 校验位，共 11 位）→ 报错
      - 按 ISO 6346 验算校验位 → 校验位错误
-     - 箱型代码已内置（源自 箱型代码全.xls），写错才报错，缺箱型不报错；
+     - 箱型代码已内置（源自 箱型代码全.xls），写错必报错；缺箱型报错，
+       但标签含 ,1/,6/,10/,16/,19/,20/,21/,23/,24/,28 时允许缺箱型；
        可在界面「箱型代码管理」中增删改查，改动保存到同目录 箱型代码配置.json
   4. 报错输出到 Excel（三列：文件地址 / 是否修改完成[留空人工填] / 备注）
   5. 检测按优先级执行：jpg&json对应 > 后缀 > 两个label不同 > 缺位 > 校验位 > 箱型，
@@ -51,6 +53,11 @@ BASE_TYPE_CODES = frozenset({
     '62G1', '62R1', 'DMG1', 'EMT1', 'L2G1', 'L2P1', 'L2R1', 'L2T1', 'L2U1', 'L2V0',
     'L2V1', 'L5G1', 'L5R1', 'L5V1', 'M2G1', 'M5G1', 'MPG1', 'P2G1', 'P5G1', 'RNR1',
     'T1G1', 'T1R1',
+})
+
+# 存在下列豁免数字标签（","加数字）时允许缺箱型代码，其余情况缺箱型报错
+TYPE_EXEMPT_LABELS = frozenset({
+    ',1', ',6', ',10', ',16', ',19', ',20', ',21', ',23', ',24', ',28',
 })
 
 
@@ -185,12 +192,15 @@ def check_json(path, cfg, stop_event=None):
     if err:
         return [('json解析失败', err)]
 
-    # 收集标签：跳过 "," 开头的；_fz/_oc 的单独归入后缀组
+    # 收集标签：跳过 "," 开头的（豁免数字标签单独记录）；_fz/_oc 的单独归入后缀组
     suffix_labels = []   # (报错类型, 原始label)
     items = []           # (原始label, 质心)
+    type_exempt = False  # 是否存在豁免数字标签（存在时允许缺箱型代码）
     for shape in data.get('shapes', []):
         lab = str(shape.get('label', '')).strip()
         if lab.startswith(','):
+            if lab in TYPE_EXEMPT_LABELS:
+                type_exempt = True
             continue                      # ","加数字的标签不予理会
         low = lab.lower()
         if '_fz' in low:
@@ -217,56 +227,89 @@ def check_json(path, cfg, stop_event=None):
         else:
             cat_items.setdefault(cat, []).append((norm, cen))
 
-    # ---- 优先级3：两个一组的 label 一致性（只差一或两位则报错）----
-    if cfg['pair']:
-        pair_errors = []
-        for cat in ('owner', 'serial', 'check', 'type', 'full'):
-            pool = cat_items.get(cat, [])
-            if len(pool) < 2:
-                continue
-            # 按质心距离贪心两两配对（同组标签对应同一箱子的上面&侧面，位置相近）
-            pool = pool[:]
-            while len(pool) >= 2:
-                best, best_d = None, None
-                for i in range(len(pool)):
-                    for j in range(i + 1, len(pool)):
-                        d = ((pool[i][1][0] - pool[j][1][0]) ** 2
-                             + (pool[i][1][1] - pool[j][1][1]) ** 2)
-                        if best_d is None or d < best_d:
-                            best_d, best = d, (i, j)
-                i, j = best
-                a, b = pool[i][0], pool[j][0]
-                if a != b:
-                    diff = diff_chars(a, b)
-                    if 1 <= diff <= 2:
-                        pair_errors.append(('标签不一致', f'{a} / {b}（相差{diff}位）'))
-                pool = [pool[k] for k in range(len(pool)) if k not in best]
-        if pair_errors:
-            return pair_errors
+    # ---- 标签配对与分组（优先级3 报错 + 供组装箱号使用）----
+    # 同类别内按质心距离贪心两两配对（同组标签对应同一箱子的上面&侧面，位置相近）：
+    #   值相同          → 合并为 1 个候选（质心取中点）
+    #   相差 1~2 位     → 标签不一致（开关开启时报错），两个值各自保留为候选
+    #   相差超过 2 位   → 判定为两个不同的箱子，两个标签各自成为候选
+    # 落单的单个标签也保留为候选
+    candidates = {cat: [] for cat in ('owner', 'serial', 'check', 'type', 'full')}
+    pair_errors = []
+    for cat in ('owner', 'serial', 'check', 'type', 'full'):
+        pool = cat_items.get(cat, [])[:]
+        while len(pool) >= 2:
+            best, best_d = None, None
+            for i in range(len(pool)):
+                for j in range(i + 1, len(pool)):
+                    d = ((pool[i][1][0] - pool[j][1][0]) ** 2
+                         + (pool[i][1][1] - pool[j][1][1]) ** 2)
+                    if best_d is None or d < best_d:
+                        best_d, best = d, (i, j)
+            i, j = best
+            a, b = pool[i], pool[j]
+            if a[0] == b[0]:
+                mid = ((a[1][0] + b[1][0]) / 2, (a[1][1] + b[1][1]) / 2)
+                candidates[cat].append((a[0], mid))
+            else:
+                diff = diff_chars(a[0], b[0])
+                if diff <= 2:
+                    pair_errors.append(('标签不一致', f'{a[0]} / {b[0]}（相差{diff}位）'))
+                candidates[cat].extend((a, b))
+            pool = [pool[k] for k in range(len(pool)) if k not in best]
+        if pool:
+            candidates[cat].append(pool[0])
 
-    # ---- 组装箱号（缺位检测与校验位检测共用）----
+    # ---- 优先级3：两个一组的 label 一致性（只差一或两位则报错）----
+    if cfg['pair'] and pair_errors:
+        return pair_errors
+
+    # ---- 组装箱号（缺位检测与校验位检测共用；支持一个文件里两个箱子）----
     numbers = []
-    if 'full' in cat_items:
-        uniq = {v for v, _ in cat_items['full']}
+    if candidates['full']:
+        uniq = sorted({v for v, _ in candidates['full']})
         if len(uniq) == 1:
-            numbers.append(next(iter(uniq)))
+            numbers.append(uniq[0])
+        elif all(diff_chars(uniq[i], uniq[j]) > 2
+                 for i in range(len(uniq)) for j in range(i + 1, len(uniq))):
+            # 多个完整箱号两两相差超过 2 位 → 两个不同的箱子，分别参与校验
+            numbers.extend(uniq)
         else:
             format_errors.append(('箱号位数缺失', '存在多个不同的完整箱号'))
     else:
-        owners = {v for v, _ in cat_items.get('owner', [])}
-        serials = {v for v, _ in cat_items.get('serial', [])}
-        checks = {v for v, _ in cat_items.get('check', [])}
-        for name, vals in (('箱主代码', owners), ('序列号', serials), ('校验位', checks)):
-            if not vals:
+        owner_c = candidates['owner']
+        serial_c = candidates['serial']
+        check_c = candidates['check']
+        for name, cands in (('箱主代码', owner_c), ('序列号', serial_c), ('校验位', check_c)):
+            if not cands:
                 format_errors.append(('箱号位数缺失', f'缺少{name}标签'))
-            elif len(vals) > 1:
-                format_errors.append(('箱号位数缺失', f'{name}存在多个不同值'))
-        if len(owners) == 1 and len(serials) == 1 and len(checks) == 1:
-            owner = next(iter(owners))
-            if len(owner) == 4 and owner[3] == 'U':
-                numbers.append(owner + next(iter(serials)) + next(iter(checks)))
-            else:
-                format_errors.append(('箱号位数缺失', f'箱主代码"{owner}"格式错误（应为3字母+U）'))
+        if len({v for v, _ in serial_c}) >= 2:
+            # ---- 多箱：每个序列号就近取箱主代码与校验位，分别组装箱号 ----
+            for s_val, s_cen in serial_c:
+                o = min(owner_c, key=lambda c: (c[1][0] - s_cen[0]) ** 2
+                        + (c[1][1] - s_cen[1]) ** 2) if owner_c else None
+                k = min(check_c, key=lambda c: (c[1][0] - s_cen[0]) ** 2
+                        + (c[1][1] - s_cen[1]) ** 2) if check_c else None
+                if o is None or k is None:
+                    continue          # 缺箱主/校验位已在上面 format_errors 报过
+                if len(o[0]) == 4 and o[0][3] == 'U':
+                    numbers.append(o[0] + s_val + k[0])
+                else:
+                    format_errors.append(('箱号位数缺失',
+                                          f'箱主代码"{o[0]}"格式错误（应为3字母+U）'))
+        else:
+            owners = {v for v, _ in owner_c}
+            serials = {v for v, _ in serial_c}
+            checks = {v for v, _ in check_c}
+            for name, vals in (('箱主代码', owners), ('序列号', serials), ('校验位', checks)):
+                if len(vals) > 1:
+                    format_errors.append(('箱号位数缺失', f'{name}存在多个不同值'))
+            if len(owners) == 1 and len(serials) == 1 and len(checks) == 1:
+                owner = next(iter(owners))
+                if len(owner) == 4 and owner[3] == 'U':
+                    numbers.append(owner + next(iter(serials)) + next(iter(checks)))
+                else:
+                    format_errors.append(('箱号位数缺失',
+                                          f'箱主代码"{owner}"格式错误（应为3字母+U）'))
 
     # ---- 优先级4：缺位 / 位数检测 ----
     if cfg['digits'] and format_errors:
@@ -283,12 +326,15 @@ def check_json(path, cfg, stop_event=None):
         if cd_errors:
             return cd_errors
 
-    # ---- 优先级6：箱型检测（缺箱型不报错，写错才报）----
+    # ---- 优先级6：箱型检测（写错必报；缺箱型默认报错，含豁免数字标签时放行）----
     if cfg['typecode']:
         tc_errors = []
-        for t in sorted({v for v, _ in cat_items.get('type', [])}):
+        types = sorted({v for v, _ in cat_items.get('type', [])})
+        for t in types:
             if t not in TYPE_CODES:
                 tc_errors.append(('箱型不存在', f'{t} 不在国标箱型代码表中'))
+        if not types and not type_exempt:
+            tc_errors.append(('缺少箱型', '未找到箱型代码标签（含 ,1 ,6 等豁免标签时允许缺箱型）'))
         if tc_errors:
             return tc_errors
 
@@ -442,7 +488,7 @@ CHECK_ITEMS = [
     ('pair',      '两个label一致性检测（同一组只差1~2位）'),
     ('digits',    '箱号缺位/位数检测'),
     ('checkdigit', '校验位检测（ISO 6346）'),
-    ('typecode',  '箱型存在检测'),
+    ('typecode',  '箱型检测（写错/缺失报错，含 ,1 ,6 等豁免标签时缺箱型放行）'),
     ('cleanup',   '删除空文件夹'),
 ]
 
