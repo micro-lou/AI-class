@@ -14,8 +14,9 @@
      - 箱号缺位 / 格式不符（应为 4 字母[第4位固定U] + 6 数字 + 1 校验位，共 11 位）→ 报错
      - 按 ISO 6346 验算校验位 → 校验位错误
      - 箱型代码已内置（源自 箱型代码全.xls），写错必报错；缺箱型报错，
-       但标签含 ,1/,6/,10/,16/,19/,20/,21/,23/,24/,28 时允许缺箱型；
-       可在界面「箱型代码管理」中增删改查，改动保存到同目录 箱型代码配置.json
+       但标签含豁免数字标签（默认 ,1 ,6 ,10 等，可管理）时允许缺箱型；
+       箱型代码 / 豁免标签均可在界面增删改查，
+       改动分别保存到同目录 箱型代码配置.json / 豁免标签配置.json
   4. 报错输出到 Excel（三列：文件地址 / 是否修改完成[留空人工填] / 备注）
   5. 检测按优先级执行：jpg&json对应 > 后缀 > 两个label不同 > 缺位 > 校验位 > 箱型，
      命中报错后停止该文件后续检测，开始下一文件
@@ -55,8 +56,9 @@ BASE_TYPE_CODES = frozenset({
     'T1G1', 'T1R1',
 })
 
-# 存在下列豁免数字标签（","加数字）时允许缺箱型代码，其余情况缺箱型报错
-TYPE_EXEMPT_LABELS = frozenset({
+# 豁免数字标签（","加数字）的内置默认值：标签含其中任意一个时允许缺箱型代码；
+# 可在界面「豁免标签管理」中增删改查，改动保存到同目录 豁免标签配置.json
+BASE_EXEMPT_LABELS = frozenset({
     ',1', ',6', ',10', ',16', ',19', ',20', ',21', ',23', ',24', ',28',
 })
 
@@ -103,6 +105,42 @@ def set_type_codes(codes):
 
 
 TYPE_CODES = load_type_codes()
+
+EXEMPT_PATH = os.path.join(app_dir(), '豁免标签配置.json')
+
+
+def valid_exempt_label(s):
+    """豁免标签须为“,”+数字（如 ,1）"""
+    return bool(re.fullmatch(r',\d+', str(s).strip()))
+
+
+def load_exempt_labels():
+    """启动时读取一次豁免标签配置；无配置文件时使用内置默认值"""
+    try:
+        with open(EXEMPT_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return BASE_EXEMPT_LABELS
+        # 逐条校验格式，过滤手改配置文件时可能混入的脏数据
+        return frozenset(s for s in (str(x).strip() for x in data)
+                         if valid_exempt_label(s))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return BASE_EXEMPT_LABELS
+
+
+def set_exempt_labels(labels):
+    """更新豁免标签（全局生效）并持久化到配置文件，返回 (是否成功, 提示)"""
+    global EXEMPT_LABELS
+    EXEMPT_LABELS = frozenset(labels)
+    try:
+        with open(EXEMPT_PATH, 'w', encoding='utf-8') as f:
+            json.dump(sorted(EXEMPT_LABELS), f, ensure_ascii=False, indent=1)
+        return True, f'已保存 {len(EXEMPT_LABELS)} 个豁免标签'
+    except OSError as e:
+        return False, f'保存到配置文件失败：{e}'
+
+
+EXEMPT_LABELS = load_exempt_labels()
 
 
 def calc_container_check(code10):
@@ -199,7 +237,7 @@ def check_json(path, cfg, stop_event=None):
     for shape in data.get('shapes', []):
         lab = str(shape.get('label', '')).strip()
         if lab.startswith(','):
-            if lab in TYPE_EXEMPT_LABELS:
+            if lab in EXEMPT_LABELS:
                 type_exempt = True
             continue                      # ","加数字的标签不予理会
         low = lab.lower()
@@ -334,7 +372,7 @@ def check_json(path, cfg, stop_event=None):
             if t not in TYPE_CODES:
                 tc_errors.append(('箱型不存在', f'{t} 不在国标箱型代码表中'))
         if not types and not type_exempt:
-            tc_errors.append(('缺少箱型', '未找到箱型代码标签（含 ,1 ,6 等豁免标签时允许缺箱型）'))
+            tc_errors.append(('缺少箱型', '未找到箱型代码标签（含豁免标签时放行，可在「豁免标签管理」中配置）'))
         if tc_errors:
             return tc_errors
 
@@ -488,9 +526,139 @@ CHECK_ITEMS = [
     ('pair',      '两个label一致性检测（同一组只差1~2位）'),
     ('digits',    '箱号缺位/位数检测'),
     ('checkdigit', '校验位检测（ISO 6346）'),
-    ('typecode',  '箱型检测（写错/缺失报错，含 ,1 ,6 等豁免标签时缺箱型放行）'),
+    ('typecode',  '箱型检测（写错/缺失报错，含豁免标签时缺箱型放行）'),
     ('cleanup',   '删除空文件夹'),
 ]
+
+
+class SetManagerDialog(tk.Toplevel):
+    """集合管理窗口：查（搜索/列表）、增、删、改、恢复默认。
+    箱型代码与豁免标签两个管理窗口共用同一套交互逻辑"""
+
+    def __init__(self, master, title, noun, fmt_hint, get_items, valid_item,
+                 save_items, base_items, base_desc, log,
+                 normalize=str, sort_key=None):
+        """noun：条目名（提示文案用）；fmt_hint：格式提示；
+        get_items：取当前集合；valid_item：格式校验；
+        save_items(set)->(是否成功, 提示)；base_items / base_desc：恢复默认；
+        log：日志回调；normalize：新增/修改输入的规范化；sort_key：列表排序"""
+        super().__init__(master)
+        self.title(title)
+        self.geometry('440x540')
+        self.transient(master)
+        self.grab_set()
+        self.noun = noun
+        self.fmt_hint = fmt_hint
+        self.get_items = get_items
+        self.valid_item = valid_item
+        self.save_items = save_items
+        self.base_items = base_items
+        self.base_desc = base_desc
+        self.log = log
+        self.normalize = normalize
+        self.sort_key = sort_key or (lambda s: s)
+
+        tk.Label(self, text='搜索：').grid(row=0, column=0, sticky='e', padx=4, pady=4)
+        self.ent_search = tk.Entry(self)
+        self.ent_search.grid(row=0, column=1, columnspan=2, sticky='we', padx=4)
+        self.ent_search.bind('<KeyRelease>', lambda e: self._refresh())
+
+        frm_list = tk.Frame(self)
+        frm_list.grid(row=1, column=0, columnspan=3, sticky='news', padx=4, pady=4)
+        self.lst = tk.Listbox(frm_list, selectmode='extended')
+        sb = tk.Scrollbar(frm_list, orient='vertical', command=self.lst.yview)
+        self.lst.config(yscrollcommand=sb.set)
+        self.lst.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+
+        tk.Label(self, text=f'新增{noun}：').grid(row=2, column=0, sticky='e', padx=4, pady=4)
+        self.ent_new = tk.Entry(self)
+        self.ent_new.grid(row=2, column=1, sticky='we', padx=4)
+        tk.Button(self, text='添加', width=8, command=self._add).grid(row=2, column=2, padx=4)
+
+        frm_ops = tk.Frame(self)
+        frm_ops.grid(row=3, column=0, columnspan=3, pady=6)
+        tk.Button(frm_ops, text='删除所选', width=10, command=self._del).pack(side='left', padx=6)
+        tk.Button(frm_ops, text='修改所选', width=10, command=self._edit).pack(side='left', padx=6)
+        tk.Button(frm_ops, text='恢复默认', width=10, command=self._reset).pack(side='left', padx=6)
+
+        self.lbl_status = tk.Label(self, text='', fg='gray')
+        self.lbl_status.grid(row=4, column=0, columnspan=3, pady=2)
+
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(1, weight=1)
+        self._refresh()
+
+    def _filtered(self):
+        """按搜索框内容过滤后的条目（查）"""
+        kw = self.ent_search.get().strip()
+        items = sorted(self.get_items(), key=self.sort_key)
+        return [c for c in items if not kw or kw in c]
+
+    def _refresh(self):
+        self.lst.delete(0, 'end')
+        for c in self._filtered():
+            self.lst.insert('end', c)
+        self.lbl_status.config(text=f'当前共 {len(self.get_items())} 个{self.noun}'
+                                    f'（显示 {self.lst.size()} 个）')
+
+    def _save(self, items, ok_msg):
+        ok, tip = self.save_items(items)
+        self.lbl_status.config(text=tip, fg='gray' if ok else 'red')
+        if ok:
+            self.log(f'[{self.noun}] {ok_msg}：{tip}')
+        self._refresh()
+
+    def _add(self):
+        """增"""
+        val = self.normalize(self.ent_new.get().strip())
+        if not self.valid_item(val):
+            messagebox.showwarning('提示', self.fmt_hint)
+            return
+        cur = self.get_items()
+        if val in cur:
+            messagebox.showinfo('提示', f'{val} 已存在。')
+            return
+        self._save(cur | {val}, f'新增 {val}')
+        self.ent_new.delete(0, 'end')
+
+    def _del(self):
+        """删"""
+        sel = list(self.lst.curselection())
+        if not sel:
+            messagebox.showinfo('提示', f'请先在列表中选择要删除的{self.noun}。')
+            return
+        vals = [self.lst.get(i) for i in sel]
+        if not messagebox.askyesno('确认', f'确定删除 {len(vals)} 个{self.noun}？\n' + '、'.join(vals)):
+            return
+        self._save(self.get_items() - set(vals), f'删除 {len(vals)} 个')
+
+    def _edit(self):
+        """改"""
+        sel = list(self.lst.curselection())
+        if len(sel) != 1:
+            messagebox.showinfo('提示', f'请先在列表中选择 1 个要修改的{self.noun}。')
+            return
+        old = self.lst.get(sel[0])
+        new = simpledialog.askstring(f'修改{self.noun}', f'将 "{old}" 修改为：',
+                                     initialvalue=old, parent=self)
+        if new is None:
+            return
+        new = self.normalize(new.strip())
+        if not self.valid_item(new):
+            messagebox.showwarning('提示', self.fmt_hint)
+            return
+        cur = self.get_items()
+        if new in cur and new != old:
+            messagebox.showinfo('提示', f'{new} 已存在。')
+            return
+        self._save((cur - {old}) | {new}, f'修改 {old} → {new}')
+
+    def _reset(self):
+        """恢复内置默认"""
+        if not messagebox.askyesno('确认', f'确定恢复为内置的 {len(self.base_items)} 个{self.base_desc}？'):
+            return
+        self._save(self.base_items, '恢复默认')
 
 
 class CheckerApp:
@@ -502,6 +670,7 @@ class CheckerApp:
         self.stop_event = threading.Event()
         self.msg_queue = queue.Queue()
         self.running = False
+        self._set_wins = {}   # 已打开的集合管理窗口（箱型代码 / 豁免标签）
 
         frm_paths = tk.Frame(master, padx=10, pady=8)
         frm_paths.pack(fill='x')
@@ -526,6 +695,8 @@ class CheckerApp:
         frm_btn.pack()
         self.btn_codes = tk.Button(frm_btn, text='箱型代码管理…', width=14, command=self.manage_codes)
         self.btn_codes.pack(side='left', padx=8)
+        self.btn_exempt = tk.Button(frm_btn, text='豁免标签管理…', width=14, command=self.manage_exempt)
+        self.btn_exempt.pack(side='left', padx=8)
         self.btn_start = tk.Button(frm_btn, text='开始检测', width=14, command=self.start)
         self.btn_start.pack(side='left', padx=8)
         self.btn_stop = tk.Button(frm_btn, text='停止', width=10, command=self.stop, state='disabled')
@@ -568,122 +739,41 @@ class CheckerApp:
             self.ent_out.delete(0, 'end')
             self.ent_out.insert(0, f)
 
-    # ==================== 箱型代码管理（增删改查） ====================
+    # ==================== 箱型代码 / 豁免标签管理（增删改查） ====================
 
     def manage_codes(self):
-        """箱型代码管理窗口：查（搜索/列表）、增、删、改、恢复默认"""
+        """打开箱型代码管理窗口"""
+        self._open_set_manager(
+            'codes', '箱型代码管理（增删改查）', '箱型代码',
+            '箱型代码须为 4 位字母数字（如 45G1）。',
+            lambda: TYPE_CODES, valid_type_code, set_type_codes,
+            BASE_TYPE_CODES, '国标箱型代码',
+            normalize=str.upper)
+
+    def manage_exempt(self):
+        """打开豁免标签管理窗口"""
+        self._open_set_manager(
+            'exempt', '豁免标签管理（增删改查）', '豁免标签',
+            '豁免标签须为“,”+数字（如 ,1）。',
+            lambda: EXEMPT_LABELS, valid_exempt_label, set_exempt_labels,
+            BASE_EXEMPT_LABELS, '默认豁免标签',
+            sort_key=lambda s: int(s[1:]))
+
+    def _open_set_manager(self, key, title, noun, fmt_hint, get_items,
+                          valid_item, save_items, base_items, base_desc,
+                          normalize=str, sort_key=None):
+        """打开（或置前已打开的）集合管理窗口，箱型代码与豁免标签共用"""
         # 已打开则直接置前，避免重复开窗覆盖控件引用、导致先开窗口操作错乱
-        win = getattr(self, 'win_codes', None)
+        win = self._set_wins.get(key)
         if win is not None and win.winfo_exists():
             win.lift()
             win.focus_force()
             return
-        win = tk.Toplevel(self.master)
-        win.title('箱型代码管理（增删改查）')
-        win.geometry('440x540')
-        win.transient(self.master)
-        win.grab_set()
-
-        tk.Label(win, text='搜索：').grid(row=0, column=0, sticky='e', padx=4, pady=4)
-        self.ent_code_search = tk.Entry(win)
-        self.ent_code_search.grid(row=0, column=1, columnspan=2, sticky='we', padx=4)
-        self.ent_code_search.bind('<KeyRelease>', lambda e: self._codes_refresh())
-
-        frm_list = tk.Frame(win)
-        frm_list.grid(row=1, column=0, columnspan=3, sticky='news', padx=4, pady=4)
-        self.lst_codes = tk.Listbox(frm_list, selectmode='extended')
-        sb = tk.Scrollbar(frm_list, orient='vertical', command=self.lst_codes.yview)
-        self.lst_codes.config(yscrollcommand=sb.set)
-        self.lst_codes.pack(side='left', fill='both', expand=True)
-        sb.pack(side='right', fill='y')
-
-        tk.Label(win, text='新增代码：').grid(row=2, column=0, sticky='e', padx=4, pady=4)
-        self.ent_code_new = tk.Entry(win)
-        self.ent_code_new.grid(row=2, column=1, sticky='we', padx=4)
-        tk.Button(win, text='添加', width=8, command=self._codes_add).grid(row=2, column=2, padx=4)
-
-        frm_ops = tk.Frame(win)
-        frm_ops.grid(row=3, column=0, columnspan=3, pady=6)
-        tk.Button(frm_ops, text='删除所选', width=10, command=self._codes_del).pack(side='left', padx=6)
-        tk.Button(frm_ops, text='修改所选', width=10, command=self._codes_edit).pack(side='left', padx=6)
-        tk.Button(frm_ops, text='恢复默认', width=10, command=self._codes_reset).pack(side='left', padx=6)
-
-        self.lbl_codes_status = tk.Label(win, text='', fg='gray')
-        self.lbl_codes_status.grid(row=4, column=0, columnspan=3, pady=2)
-
-        win.columnconfigure(1, weight=1)
-        win.rowconfigure(1, weight=1)
-        self.win_codes = win
-        self._codes_refresh()
-
-    def _codes_filtered(self):
-        """按搜索框内容过滤后的箱型代码（查）"""
-        kw = self.ent_code_search.get().strip().upper()
-        codes = sorted(TYPE_CODES)
-        return [c for c in codes if not kw or kw in c]
-
-    def _codes_refresh(self):
-        self.lst_codes.delete(0, 'end')
-        for c in self._codes_filtered():
-            self.lst_codes.insert('end', c)
-        self.lbl_codes_status.config(text=f'当前共 {len(TYPE_CODES)} 个箱型代码'
-                                          f'（显示 {self.lst_codes.size()} 个）')
-
-    def _codes_save(self, codes, ok_msg):
-        ok, tip = set_type_codes(codes)
-        self.lbl_codes_status.config(text=tip, fg='gray' if ok else 'red')
-        if ok:
-            self.log(f'[箱型代码] {ok_msg}：{tip}')
-        self._codes_refresh()
-
-    def _codes_add(self):
-        """增"""
-        val = self.ent_code_new.get().strip().upper()
-        if not valid_type_code(val):
-            messagebox.showwarning('提示', '箱型代码须为 4 位字母数字（如 45G1）。')
-            return
-        if val in TYPE_CODES:
-            messagebox.showinfo('提示', f'{val} 已存在。')
-            return
-        self._codes_save(TYPE_CODES | {val}, f'新增 {val}')
-        self.ent_code_new.delete(0, 'end')
-
-    def _codes_del(self):
-        """删"""
-        sel = list(self.lst_codes.curselection())
-        if not sel:
-            messagebox.showinfo('提示', '请先在列表中选择要删除的代码。')
-            return
-        vals = [self.lst_codes.get(i) for i in sel]
-        if not messagebox.askyesno('确认', f'确定删除 {len(vals)} 个代码？\n' + '、'.join(vals)):
-            return
-        self._codes_save(TYPE_CODES - set(vals), f'删除 {len(vals)} 个')
-
-    def _codes_edit(self):
-        """改"""
-        sel = list(self.lst_codes.curselection())
-        if len(sel) != 1:
-            messagebox.showinfo('提示', '请先在列表中选择 1 个要修改的代码。')
-            return
-        old = self.lst_codes.get(sel[0])
-        new = simpledialog.askstring('修改箱型代码', f'将 "{old}" 修改为：',
-                                    initialvalue=old, parent=self.lst_codes.master)
-        if new is None:
-            return
-        new = new.strip().upper()
-        if not valid_type_code(new):
-            messagebox.showwarning('提示', '箱型代码须为 4 位字母数字（如 45G1）。')
-            return
-        if new in TYPE_CODES and new != old:
-            messagebox.showinfo('提示', f'{new} 已存在。')
-            return
-        self._codes_save((TYPE_CODES - {old}) | {new}, f'修改 {old} → {new}')
-
-    def _codes_reset(self):
-        """恢复内置默认"""
-        if not messagebox.askyesno('确认', '确定恢复为内置的 62 个国标箱型代码？'):
-            return
-        self._codes_save(BASE_TYPE_CODES, '恢复默认')
+        win = SetManagerDialog(self.master, title, noun, fmt_hint,
+                               get_items, valid_item, save_items,
+                               base_items, base_desc, self.log,
+                               normalize=normalize, sort_key=sort_key)
+        self._set_wins[key] = win
 
     def log(self, msg):
         self.msg_queue.put(msg)
