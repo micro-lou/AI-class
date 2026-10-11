@@ -6,7 +6,8 @@
   1. 遍历指定文件夹（支持多层嵌套，层层深入），空文件夹自动删除（可开关）
   2. 检查文件夹内 1.jpg 与 1.json 一一对应（不对应则报错）
   3. 解析 LabelMe json 的 label：
-     - 含 _fz / _oc 后缀的标签不校验，直接按报错处理（不清晰 / 遮挡）
+     - 含 _fz / _oc 后缀的标签：开关开启时报错（不清晰 / 遮挡）；
+       开关关闭时整个文件直接跳过，不做其他任何校验也不报错
      - 内容为 "," 加数字的标签不予理会
      - 两个一组的 label 值只差一或两位 → 报错（标签不一致）
      - 箱号缺位 / 格式不符（应为 4 字母[第4位固定U] + 6 数字 + 1 校验位，共 11 位）→ 报错
@@ -201,8 +202,9 @@ def check_json(path, cfg, stop_event=None):
         items.append((lab, label_centroid(shape)))
 
     # ---- 优先级2：_fz / _oc 后缀 ----
-    if cfg['suffix'] and suffix_labels:
-        return suffix_labels
+    # 开关开启：按报错处理；开关关闭：整个文件直接跳过，不做其他任何校验也不报错
+    if suffix_labels:
+        return suffix_labels if cfg['suffix'] else []
 
     # 标签归类
     cat_items = {}      # 类别 -> [(规范化值, 质心)]
@@ -436,7 +438,7 @@ LOG_BATCH_LIMIT = 300
 
 CHECK_ITEMS = [
     ('pairing',   'jpg/json 文件对应检测'),
-    ('suffix',    '_fz/_oc 后缀检测'),
+    ('suffix',    '_fz/_oc 后缀检测（关闭时含此类标签的文件直接跳过）'),
     ('pair',      '两个label一致性检测（同一组只差1~2位）'),
     ('digits',    '箱号缺位/位数检测'),
     ('checkdigit', '校验位检测（ISO 6346）'),
