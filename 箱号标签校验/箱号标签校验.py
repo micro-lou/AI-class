@@ -744,7 +744,7 @@ class CheckerApp:
     def manage_codes(self):
         """打开箱型代码管理窗口"""
         self._open_set_manager(
-            'codes', '箱型代码管理（增删改查）', '箱型代码',
+            'codes', '箱型代码管理', '箱型代码',
             '箱型代码须为 4 位字母数字（如 45G1）。',
             lambda: TYPE_CODES, valid_type_code, set_type_codes,
             BASE_TYPE_CODES, '国标箱型代码',
@@ -753,7 +753,7 @@ class CheckerApp:
     def manage_exempt(self):
         """打开豁免标签管理窗口"""
         self._open_set_manager(
-            'exempt', '豁免标签管理（增删改查）', '豁免标签',
+            'exempt', '豁免标签管理', '豁免标签',
             '豁免标签须为“,”+数字（如 ,1）。',
             lambda: EXEMPT_LABELS, valid_exempt_label, set_exempt_labels,
             BASE_EXEMPT_LABELS, '默认豁免标签',
