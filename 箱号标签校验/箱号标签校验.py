@@ -19,14 +19,9 @@
        箱型代码 / 豁免标签均可在界面增删改查，
        改动分别保存到同目录 箱型代码配置.json / 豁免标签配置.json
   4. 报错输出到 Excel（三列：文件地址 / 是否修改完成[留空人工填] / 备注）；
-     两个输出开关（默认全开，可自定义）：
+     输出开关（默认开，可关闭）：
      - 带宏 Excel：输出带宏 .xlsm（需同目录或内置 报错模板.xlsm），
-       双击 A 列文件地址用 LabelMe 单独打开该文件、
-       点 E1 用 LabelMe 打开问题文件列表（上一张/下一张切换）；关闭则输出普通 .xlsx
-     - 问题文件文件夹：生成「_问题文件」符号链接文件夹，把所有报错文件
-       （含 jpg 同伴）链接到一处（位置默认在输出 Excel 旁，可自定义）——
-       链接指向原始文件（可为 NAS 路径，NAS 目录不动），在 LabelMe 中
-       修改保存直接写回原文件；无符号链接权限时降级为复制并警告
+       双击 A 列文件地址用 LabelMe 单独打开该文件；关闭则输出普通 .xlsx
   5. 检测按优先级执行：jpg&json对应 > 后缀 > 完整箱号一致性 > 缺位 > 校验位 > 箱型，
      命中报错后停止该文件后续检测，开始下一文件
 
@@ -472,73 +467,9 @@ def precheck_output(out_xlsx):
     return None
 
 
-def build_problem_folder(out_xlsx, errors, log, enabled=True, custom_dir=None):
-    """建立「_问题文件」符号链接文件夹，返回文件夹路径（不建时返回 None）。
-
-    位置默认在输出 Excel 同目录，custom_dir 可自定义；
-    文件夹内为各报错文件（及其同目录 jpg/json 同伴，成对链入）的符号链接，
-    指向原始文件（可为 NAS 路径，NAS 目录不动）——在 LabelMe 中打开该文件夹，
-    用上一张/下一张（快捷键 D / A）在问题文件间逐个切换，修改保存通过
-    链接直接写回原文件。不同子文件夹同名文件加父文件夹前缀区分；
-    无符号链接权限（未开开发者模式/管理员）时降级为复制并警告——
-    复制版在 LabelMe 里的修改不会写回原文件，需手动搬回。"""
-    if not enabled or not errors:
-        return None
-    stem = os.path.splitext(os.path.basename(out_xlsx))[0]
-    folder = os.path.join(custom_dir or os.path.dirname(os.path.abspath(out_xlsx)),
-                          stem + '_问题文件')
-    if os.path.isdir(folder):        # 同名输出重跑时清掉旧链接文件夹重建
-        shutil.rmtree(folder, ignore_errors=True)
-    os.makedirs(folder)
-
-    # 按报错文件分组：报错文件及其同伴都链入（LabelMe 依 json 的
-    # imagePath 在同目录找图，两边链接名须保持一致才能配对显示）
-    groups = {}          # (目录, 主名) -> {扩展名: 原始文件绝对路径}
-    for fpath, *_ in errors:
-        src = os.path.abspath(fpath)
-        d, name = os.path.split(src)
-        b, ext = os.path.splitext(name)
-        g = groups.setdefault((d, b), {})
-        if ext.lower() in ('.jpg', '.jpeg'):
-            g[ext.lower()] = src
-            partner = os.path.join(d, b + '.json')
-            if os.path.exists(partner):
-                g['.json'] = partner
-        elif ext.lower() == '.json':
-            g['.json'] = src
-            for je in ('.jpg', '.jpeg'):
-                partner = os.path.join(d, b + je)
-                if os.path.exists(partner):
-                    g[je] = partner
-
-    used = {}             # 已用链接主名，防不同子文件夹的同名文件互相覆盖
-    degraded = 0          # 降级为复制的文件数
-    for (d, b), exts in groups.items():
-        link_b = b
-        if link_b in used:
-            link_b = f'{os.path.basename(d) or "x"}_{b}'
-            n = 2
-            while link_b in used:
-                link_b = f'{os.path.basename(d) or "x"}_{b}_{n}'
-                n += 1
-        used[link_b] = True
-        for ext, src in exts.items():
-            dst = os.path.join(folder, link_b + ext)
-            try:
-                os.symlink(os.path.abspath(src), dst)
-            except OSError:
-                shutil.copy2(src, dst)
-                degraded += 1
-    if degraded:
-        log(f'[警告] {degraded} 个文件无法创建符号链接，已降级为复制——'
-            f'在 LabelMe 中修改这些文件不会写回原位置，需手动搬回！')
-    log(f'[信息] 报错文件已集中到符号链接文件夹：{folder}')
-    return folder
-
-
 def run_detection(root, cfg, out_xlsx, log, stop_event):
     """主流程：遍历 root，返回汇总信息 dict"""
-    root = os.path.abspath(root)     # Excel 双击打开、符号链接均需绝对路径
+    root = os.path.abspath(root)     # Excel 双击打开需绝对路径
     # 按带宏开关规范化扩展名：开→.xlsm（宏才能保留），关→.xlsx
     normalized = normalize_out(out_xlsx, cfg.get('macro', True))
     if normalized != out_xlsx:
@@ -591,13 +522,7 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
             except OSError as e:
                 log(f'[清理] 删除失败 {dirpath}：{e}')
 
-    # 报错文件集中为符号链接文件夹，供 LabelMe 上一张/下一张逐个修改
-    problem_folder = build_problem_folder(out_xlsx, all_errors, log,
-                                          enabled=cfg.get('pfolder', True),
-                                          custom_dir=cfg.get('pfolder_dir'))
-
-    write_excel(out_xlsx, all_errors, problem_folder,
-                macro=cfg.get('macro', True))
+    write_excel(out_xlsx, all_errors, macro=cfg.get('macro', True))
 
     return {
         'dirs': n_dirs,
@@ -605,19 +530,16 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
         'errors': len(all_errors),
         'deleted': n_deleted,
         'out': out_xlsx,
-        'problem_folder': problem_folder,
     }
 
 
-def write_excel(path, errors, problem_folder=None, macro=True):
+def write_excel(path, errors, macro=True):
     """报错写入 Excel：文件地址 / 是否修改完成（留空人工填）/ 备注。
     macro=True 且有宏模板时输出带宏 .xlsm：双击 A 列文件地址用 LabelMe
-    单独打开该文件、点 E1 用 LabelMe 打开问题文件文件夹；宏参数存隐藏列 Z
-    （Z1 文件夹路径、Z2 LabelMe 完整路径）。
+    单独打开该文件；宏参数存隐藏列 Z（Z2 LabelMe 完整路径）。
     宏开关关闭或模板缺失时降级为普通 .xlsx（无上述打开功能）"""
     from openpyxl import Workbook, load_workbook
     from openpyxl.styles import Font, Alignment
-    from openpyxl.worksheet.hyperlink import Hyperlink
 
     tmpl = template_path() if macro else None
     if tmpl:
@@ -639,12 +561,8 @@ def write_excel(path, errors, problem_folder=None, macro=True):
     ws.column_dimensions['B'].width = 14
     ws.column_dimensions['C'].width = 50
     ws.freeze_panes = 'A2'
-    if tmpl and problem_folder:
-        # E1 链接（点击触发工作表宏打开问题文件夹）；Z 列隐藏参数供宏读取
-        ws['E1'] = '▶ 在 LabelMe 中打开问题文件列表'
-        ws['E1'].hyperlink = Hyperlink(ref='E1', location=f'{ws.title}!A1')
-        ws['E1'].font = Font(bold=True, color='0563C1', underline='single')
-        ws['Z1'] = problem_folder
+    if tmpl:
+        # Z 列隐藏参数供双击宏读取（Z2 LabelMe 完整路径）
         ws['Z2'] = shutil.which('labelme') or ''
         ws.column_dimensions['Z'].hidden = True
     wb.save(path)
@@ -820,25 +738,14 @@ class CheckerApp:
         # 最近一次自动生成的默认输出路径；输入框内容与之相同（或为空）即视为
         # 未自定义，仍随所选文件夹自动更新，方向键等按键不会造成误判
         self._out_default = default_out
-        # 问题文件符号链接文件夹位置（默认跟随输出 Excel 所在目录，可自定义）
-        self.ent_pfolder, self.btn_pfolder = self._path_row(
-            frm_paths, 2, '问题文件位置：', self._pick_pfolder)
-        self._pfolder_default = None     # 最近一次自动填充的默认位置，同上逻辑
-        self._sync_pfolder_default()
 
         frm_opts = tk.LabelFrame(master, text='输出选项', padx=10, pady=6)
         frm_opts.pack(fill='x', padx=10, pady=4)
         self.chk_macro = tk.BooleanVar(value=True)
         tk.Checkbutton(
             frm_opts, variable=self.chk_macro,
-            text='生成带宏 Excel（.xlsm，Excel 中双击文件地址 / 点击 E1 直接打开 LabelMe）'
+            text='生成带宏 Excel（.xlsm，Excel 中双击文件地址直接打开 LabelMe）'
         ).grid(row=0, column=0, sticky='w', pady=2)
-        self.chk_pfolder = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            frm_opts, variable=self.chk_pfolder, command=self._toggle_pfolder_row,
-            text='创建问题文件符号链接文件夹（集中报错文件，LabelMe 上一张/下一张切换修改，保存直接写回原文件）'
-        ).grid(row=1, column=0, sticky='w', pady=2)
-        self._toggle_pfolder_row()
 
         frm_checks = tk.LabelFrame(master, text='检测项开关（按优先级顺序执行，命中即停）', padx=10, pady=6)
         frm_checks.pack(fill='x', padx=10, pady=4)
@@ -888,7 +795,6 @@ class CheckerApp:
                 self.ent_out.delete(0, 'end')
                 self.ent_out.insert(0, default_out)
                 self._out_default = default_out
-        self._sync_pfolder_default()
 
     def _pick_out(self):
         f = filedialog.asksaveasfilename(defaultextension='.xlsm',
@@ -899,29 +805,6 @@ class CheckerApp:
             # 用户已自行选择 Excel 生成地址（与默认值不同），之后不再自动覆盖
             self.ent_out.delete(0, 'end')
             self.ent_out.insert(0, f)
-        self._sync_pfolder_default()
-
-    def _pick_pfolder(self):
-        d = filedialog.askdirectory(initialdir=self.ent_pfolder.get() or DESKTOP)
-        if d:
-            self.ent_pfolder.delete(0, 'end')
-            self.ent_pfolder.insert(0, d)
-
-    def _sync_pfolder_default(self):
-        """问题文件位置未自定义时，自动跟随输出 Excel 所在目录"""
-        out = self.ent_out.get().strip()
-        new_default = os.path.dirname(os.path.abspath(out)) if out else ''
-        cur = self.ent_pfolder.get().strip()
-        if not cur or cur == self._pfolder_default:
-            self.ent_pfolder.delete(0, 'end')
-            self.ent_pfolder.insert(0, new_default)
-        self._pfolder_default = new_default
-
-    def _toggle_pfolder_row(self):
-        """「创建问题文件文件夹」开关联动：关闭时置灰位置输入行"""
-        state = 'normal' if self.chk_pfolder.get() else 'disabled'
-        self.ent_pfolder.config(state=state)
-        self.btn_pfolder.config(state=state)
 
     # ==================== 箱型代码 / 豁免标签管理（增删改查） ====================
 
@@ -977,16 +860,7 @@ class CheckerApp:
             out += '.xlsx'          # 有宏模板时 run_detection 内会再转为 .xlsm
 
         cfg = {k: v.get() for k, v in self.cfg_vars.items()}
-        # 输出选项：是否带宏 / 是否建问题文件文件夹及其位置
-        cfg['macro'] = self.chk_macro.get()
-        cfg['pfolder'] = self.chk_pfolder.get()
-        pfolder_dir = self.ent_pfolder.get().strip()
-        if not pfolder_dir or pfolder_dir == self._pfolder_default:
-            pfolder_dir = None      # 未自定义 → 跟随输出 Excel 所在目录
-        elif not os.path.isdir(pfolder_dir):
-            messagebox.showerror('错误', f'问题文件位置不存在：\n{pfolder_dir}')
-            return
-        cfg['pfolder_dir'] = pfolder_dir
+        cfg['macro'] = self.chk_macro.get()     # 输出选项：是否带宏
         if not any(v.get() for v in self.cfg_vars.values()):
             messagebox.showwarning('提示', '所有检测项均已关闭，将不会产生任何报错。')
 
@@ -1045,12 +919,9 @@ class CheckerApp:
         else:
             lines = [f"检测完成：共扫描文件夹 {summary['dirs']} 个，检查 json {summary['json']} 个，"
                      f"报错 {summary['errors']} 条，删除空文件夹 {summary['deleted']} 个。",
-                     f"结果已保存至：{summary['out']}"]
-            if summary.get('problem_folder'):
-                lines.append('报错文件已集中到符号链接文件夹（LabelMe 中上一张/下一张切换修改，'
-                             f'保存直接写回原文件）：{summary["problem_folder"]}')
-                lines.append('Excel 中：双击「文件地址」单独打开该文件；点击 E1 打开问题文件列表。'
-                             '首次打开需点「启用内容」允许宏。')
+                     f"结果已保存至：{summary['out']}",
+                     'Excel 中：双击「文件地址」直接打开该文件。'
+                     '首次打开需点「启用内容」允许宏。']
             for ln in lines:
                 self.log(f'[信息] {ln}')
             messagebox.showinfo('完成', '\n'.join(lines))
@@ -1069,7 +940,7 @@ def run_cli(args):
     if not out.lower().endswith(('.xlsx', '.xlsm')):
         out += '.xlsx'          # 有宏模板时 run_detection 内会再转为 .xlsm
     cfg = {key: True for key, _ in CHECK_ITEMS}
-    cfg.update(macro=True, pfolder=True, pfolder_dir=None)   # 输出选项默认全开
+    cfg['macro'] = True              # 输出选项默认开
     stop_event = threading.Event()
     try:
         summary = run_detection(args.root, cfg, out, print, stop_event)
@@ -1079,8 +950,6 @@ def run_cli(args):
     print(f"检测完成：文件夹 {summary['dirs']} 个，json {summary['json']} 个，"
           f"报错 {summary['errors']} 条，删除空文件夹 {summary['deleted']} 个")
     print(f"结果已保存至：{summary['out']}")
-    if summary.get('problem_folder'):
-        print(f"问题文件符号链接文件夹：{summary['problem_folder']}")
 
 
 def main():
