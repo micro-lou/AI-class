@@ -14,7 +14,8 @@
        框外的标签视为危险标识/相邻箱喷字，不参与校验；框内只有孤立数字
        （无箱主代码/序列号）的组视为危险标识组，整组忽略。
        无类别框时退回全局比对（此时单数字标签多于箱号组数的话，
-       多出的按与序列号距离截断，视为危险标识不参与组装）
+       多出的按与序列号距离截断，视为危险标识不参与组装）；
+       逗号写反的类别标签（如 "1,"）框同样参与分组，但报错提示改正
      - 标签一致性用完整 11 位箱号整体比对（组内两两比对，不拆分成三段）：
        组装出的多个完整箱号只差一或两位 → 报错（标签不一致）；
        相差超过两位 → 判定为不同的箱子，各自检测校验位
@@ -419,10 +420,14 @@ def check_json(path, cfg, stop_event=None):
     suffix_labels = []   # (报错类型, 原始label)
     items = []           # (原始label, 质心)
     category_boxes = []  # 类别框 (x0, y0, x1, y1)，箱号标签按框分组
+    reversed_labels = [] # 逗号写反的类别标签（如 "1,"）：框照常用，但要报错
     type_exempt = False  # 是否存在豁免数字标签（存在时允许缺箱型代码）
     for shape in data.get('shapes', []):
         lab = str(shape.get('label', '')).strip()
-        # 类别标签："，数字"；逗号写在后面的（如 "1,"）是写反的类别标签，同样当框用
+        # 类别标签："，数字"；逗号写在后面的（如 "1,"）是写反的类别标签，
+        # 框同样用于分组，但需报错提示改正
+        if re.fullmatch(r'\d+,', lab):
+            reversed_labels.append(lab)
         if lab.startswith(',') or re.fullmatch(r'\d+,', lab):
             if lab in EXEMPT_LABELS:
                 type_exempt = True
@@ -470,6 +475,9 @@ def check_json(path, cfg, stop_event=None):
         return pair_errors
 
     # ---- 优先级4：缺位 / 位数检测 ----
+    # 逗号写反的类别标签（如 "1,"）一并在此报错，提示改为 ",1"
+    for lab in reversed_labels:
+        format_errors.append(('箱号位数缺失', f'标签"{lab}"逗号写反，应为",{lab[:-1]}"'))
     if cfg['digits'] and format_errors:
         return format_errors
 
