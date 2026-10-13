@@ -392,7 +392,9 @@ def group_by_category(items, category_boxes, image_width):
     返回 [组内标签列表, ...]，每个元素为 [(label, 质心), ...]"""
     if not category_boxes:
         return [items] if items else []
-    tol = round((image_width or 1920) * CATEGORY_TOL_RATIO)
+    # imageWidth 缺失或非数字（损坏 json）时退回 1920 默认值
+    width = image_width if isinstance(image_width, (int, float)) and image_width > 0 else 1920
+    tol = round(width * CATEGORY_TOL_RATIO)
     centers = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in category_boxes]
 
     def rank(i, cen):
@@ -549,6 +551,18 @@ def load_json(path):
 
 # ============================ 单个 json 检测 ============================
 
+def dedupe_errors(errors):
+    """同一（类型, 细节）报错只保留一条：同一异常标签被分到多个组、
+    或多个形状带相同标签时会累积出完全重复的报错，Excel 无需重复成行"""
+    seen = set()
+    out = []
+    for e in errors:
+        if e not in seen:
+            seen.add(e)
+            out.append(e)
+    return out
+
+
 def check_json(path, cfg, stop_event=None):
     """检测一个 json 文件，返回报错列表 [(类型, 细节)]。
     按优先级顺序执行，命中报错即停止后续检测。"""
@@ -557,6 +571,11 @@ def check_json(path, cfg, stop_event=None):
     data, err = load_json(path)
     if err:
         return [('json解析失败', err)]
+    # shapes 缺失 / 为 null / 条目非对象（手改或损坏的 json）：按损坏文件报错，
+    # 不让遍历时的异常一路抛到线程池外、中断整个检测丢失已扫出的结果
+    shapes = data.get('shapes')
+    if not isinstance(shapes, list) or not all(isinstance(s, dict) for s in shapes):
+        return [('json解析失败', 'shapes 字段缺失或格式异常')]
 
     # 收集标签："," 开头的类别标签记录其框（用于分组）；_fz/_oc 的归入后缀组
     suffix_labels = []   # (报错类型, 原始label)
@@ -564,7 +583,7 @@ def check_json(path, cfg, stop_event=None):
     category_boxes = []  # 类别框 (x0, y0, x1, y1)，箱号标签按框分组
     reversed_labels = [] # 逗号写反的类别标签（如 "1,"）：框照常用，但要报错
     type_exempt = False  # 是否存在豁免数字标签（存在时允许缺箱型代码）
-    for shape in data.get('shapes', []):
+    for shape in shapes:
         lab = str(shape.get('label', '')).strip()
         # 类别标签："，数字"；逗号写在后面的（如 "1,"）是写反的类别标签，
         # 框同样用于分组，但需报错提示改正
@@ -589,7 +608,7 @@ def check_json(path, cfg, stop_event=None):
     # ---- 优先级2：_fz / _oc 后缀 ----
     # 开关开启：按报错处理；开关关闭：整个文件直接跳过，不做其他任何校验也不报错
     if suffix_labels:
-        return suffix_labels if cfg['suffix'] else []
+        return dedupe_errors(suffix_labels) if cfg['suffix'] else []
 
     # ---- 按类别框分组：框外标签（危险标识/相邻箱喷字）不参与校验 ----
     groups = group_by_category(items, category_boxes, data.get('imageWidth'))
@@ -614,6 +633,9 @@ def check_json(path, cfg, stop_event=None):
     numbers = sorted(set(numbers))
     all_types = sorted(set(all_types))
     owners = sorted(set(owners))
+    # 各组累积的报错去重（同一异常标签可能出现在多个组 / 多个形状上）
+    pair_errors = dedupe_errors(pair_errors)
+    format_errors = dedupe_errors(format_errors)
 
     # ---- 优先级3：标签一致性（组内已比对，命中即停）----
     # 箱号不一致的报错已附带校验位比对结论（见 number_pair_error），
@@ -675,10 +697,25 @@ def check_json(path, cfg, stop_event=None):
     if tc_errors:
         return tc_errors
 
-    # 其余检测全部通过：未注册箱主代码视为新箱主，自动加入注册表且不报错
+    # 其余检测全部通过：未注册箱主代码视为新箱主，自动加入注册表且不报错。
+    # 校验位检测被关闭时无法确认箱号真实性，不自动入库（避免污染注册表），
+    # 改为照常报错提示人工核对
     if unknown_prefixes:
-        auto_add_bic_prefixes(unknown_prefixes)
+        if cfg['checkdigit']:
+            auto_add_bic_prefixes(unknown_prefixes)
+        else:
+            return oc_errors
     return []
+
+
+def safe_check_json(path, cfg, stop_event=None):
+    """check_json 的兜底包装：json 内容损坏（字段类型异常等）引发意外异常时，
+    降级为该文件的一条报错并继续检测后续文件，而不是中断整个检测、
+    丢失已扫出的全部结果"""
+    try:
+        return check_json(path, cfg, stop_event)
+    except Exception as e:
+        return [('json解析失败', f'检测时发生未预期异常 {type(e).__name__}: {e}')]
 
 
 # ============================ 文件夹遍历与汇总 ============================
@@ -818,7 +855,7 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
     # stop_event 传入 check_json：请求停止后尚未开始的任务直接跳过
     max_workers = min(8, os.cpu_count() or 1)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = iter(pool.map(lambda p: check_json(p, cfg, stop_event), paths))
+        results = iter(pool.map(lambda p: safe_check_json(p, cfg, stop_event), paths))
         stopped = False
         for targets in dir_targets:
             if stopped:
@@ -1274,10 +1311,15 @@ class CheckerApp:
         else:
             lines = [f"检测完成：共扫描文件夹 {summary['dirs']} 个，检查 json {summary['json']} 个，"
                      f"报错 {summary['errors']} 条，删除空文件夹 {summary['deleted']} 个。",
-                     f"结果已保存至：{summary['out']}",
-                     'Excel 中：双击「文件地址」打开 LabelMe 列表并定位到该行，'
-                     '可用快捷键 D/A 上下切换（需启用宏，同目录已生成 labelme批量打开.py）。'
-                     '首次打开需点「启用内容」允许宏。']
+                     f"结果已保存至：{summary['out']}"]
+            # 按实际输出格式提示：.xlsm 才带双击打开 LabelMe 的宏功能
+            if summary['out'].lower().endswith('.xlsm'):
+                lines.append('Excel 中：双击「文件地址」打开 LabelMe 列表并定位到该行，'
+                             '可用快捷键 D/A 上下切换（需启用宏，同目录已生成 labelme批量打开.py）。'
+                             '首次打开需点「启用内容」允许宏。')
+            else:
+                lines.append('本次输出为普通 .xlsx（宏开关关闭或缺少宏模板），'
+                             '不具备双击文件地址打开 LabelMe 的功能。')
             for ln in lines:
                 self.log(f'[信息] {ln}')
             messagebox.showinfo('完成', '\n'.join(lines))
