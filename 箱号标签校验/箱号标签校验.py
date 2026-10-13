@@ -3,7 +3,8 @@
 箱号标签校验工具（ISO 6346 校验位验算，筛选错误标签）
 
 功能：
-  1. 遍历指定文件夹（支持多层嵌套，层层深入），空文件夹自动删除（可开关）
+  1. 遍历指定文件夹（支持多层嵌套，逐层并行枚举，网络盘深目录不拖慢扫描），
+     空文件夹自动删除（可开关）
   2. 检查文件夹内 1.jpg 与 1.json 一一对应（不对应则报错）
   3. 解析 LabelMe json 的 label：
      - 含 _fz / _oc 后缀的标签：开关开启时报错（不清晰 / 遮挡）；
@@ -39,6 +40,10 @@
        可用 上一张/下一张（快捷键 A/D）按表内顺序切换；关闭则输出普通 .xlsx
   5. 检测按优先级执行：jpg&json对应 > 后缀 > 完整箱号一致性 > 缺位 > 箱主代码 >
      校验位 > 箱型，命中报错后停止该文件后续检测，开始下一文件
+  6. 检测结果缓存（默认开，可关闭，存同目录 检测结果缓存.json）：重跑时
+     未修改的文件（修改时间/大小不变且配置一致）直接复用上次结果，只实际
+     检测变化过的文件；任一配置（箱型/豁免/BIC/检测开关）改动后自动全量
+     重检，删除缓存文件亦可强制全量
 
 用法：
   图形界面：python 箱号标签校验.py（exe 也可把待检文件夹直接拖到图标上启动；
@@ -46,6 +51,7 @@
   命令行：  python 箱号标签校验.py --cli --root <文件夹> [--out <输出.xlsm>]
 """
 
+import hashlib
 import json
 import os
 import queue
@@ -719,35 +725,151 @@ def safe_check_json(path, cfg, stop_event=None):
         return [('json解析失败', f'检测时发生未预期异常 {type(e).__name__}: {e}')]
 
 
+# ============================ 检测结果缓存 ============================
+# 修标工作流是「检测 → 修 → 重跑验证」，重跑时绝大多数文件没动过。
+# 缓存键为 json 路径，条目存 [配置指纹, 修改时间, 大小, 报错列表]：
+# 路径 + 修改时间 + 大小 + 配置指纹全部一致才复用，任一变化即重新检测。
+# 删除同目录 检测结果缓存.json 可随时强制全量重检
+
+CACHE_PATH = os.path.join(app_dir(), '检测结果缓存.json')
+
+
+def valid_cache_entry(v):
+    """缓存条目格式校验（防手改/损坏的脏数据混入）：应为
+    [配置指纹(str), 修改时间(int), 大小(int), 报错列表(每个2元素)]"""
+    return (isinstance(v, list) and len(v) == 4
+            and isinstance(v[0], str) and isinstance(v[1], int)
+            and isinstance(v[2], int) and isinstance(v[3], list)
+            and all(isinstance(e, list) and len(e) == 2 for e in v[3]))
+
+
+def load_result_cache():
+    """读取上次运行的结果缓存（json路径 -> 条目）；
+    无文件、损坏或条目格式不对的按空缓存处理"""
+    try:
+        with open(CACHE_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if valid_cache_entry(v)}
+
+
+def save_result_cache(cache):
+    """把检测结果缓存写回（先写临时文件再原子替换，避免中途被杀留下半个
+    文件）；写失败静默跳过，不影响检测结果"""
+    try:
+        tmp = CACHE_PATH + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False)
+        os.replace(tmp, CACHE_PATH)
+    except OSError:
+        pass
+
+
+def cache_fingerprint(cfg):
+    """缓存配置指纹：影响检测结果的检测开关 + 三套配置（箱型/豁免/BIC）的
+    实际内容。任一变化指纹即变 → 旧缓存全部失效，自动全量重检"""
+    payload = json.dumps({
+        'cfg': {k: bool(cfg.get(k)) for k in
+                ('suffix', 'pair', 'digits', 'ownercode', 'checkdigit', 'typecode')},
+        'type': sorted(TYPE_CODES),
+        'exempt': sorted(EXEMPT_LABELS),
+        'bic': sorted(BIC_PREFIXES),
+    }, sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(payload.encode('utf-8')).hexdigest()
+
+
+def check_json_cached(path, cfg, stop_event, cache, fingerprint, stats):
+    """带缓存的检测：文件未变（修改时间/大小不变）且配置指纹一致时直接
+    复用上次结果，跳过 json 读取与全部检测。cache 为 None 表示关闭缓存
+    （直接全量检测）；stats 为命中计数列表（append 原子，线程安全够用）"""
+    if cache is None:
+        return safe_check_json(path, cfg, stop_event)
+    if stop_event is not None and stop_event.is_set():
+        # 已停止：直接跳过且不写缓存，避免把「没检」当成「没错」缓存下来
+        return []
+    try:
+        st = os.stat(path)
+    except OSError:
+        return safe_check_json(path, cfg, stop_event)   # stat 不到就直接检测
+    entry = cache.get(path)
+    if (entry is not None and entry[0] == fingerprint
+            and entry[1] == st.st_mtime_ns and entry[2] == st.st_size):
+        stats.append('hit')
+        return entry[3]
+    result = safe_check_json(path, cfg, stop_event)
+    # 检测中途收到停止请求时不写缓存（此时结果为空并非真实结论）
+    if stop_event is None or not stop_event.is_set():
+        cache[path] = [fingerprint, st.st_mtime_ns, st.st_size, result]
+    stats.append('miss')
+    return result
+
+
 # ============================ 文件夹遍历与汇总 ============================
 
-def scan_dirs(root, cfg, stop_event=None):
-    """遍历 root（支持多层嵌套），返回 (各目录待检 json 路径列表, 配对报错列表)。
-    先收集完所有目录再统一检测，避免逐目录等待导致并行度不足"""
-    dir_targets = []   # [[json路径, ...], ...] 按遍历顺序，每项对应一个目录
-    errors = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        if stop_event is not None and stop_event.is_set():
-            break
-        jpgs, jsons = {}, {}
-        for name in filenames:
-            stem, ext = os.path.splitext(name)
-            ext = ext.lower()
-            if ext in ('.jpg', '.jpeg'):
-                jpgs[stem] = os.path.join(dirpath, name)
-            elif ext == '.json':
-                jsons[stem] = os.path.join(dirpath, name)
+# 目录扫描并行度：目录枚举是纯网络往返（NAS 高延迟下每个目录几十毫秒），
+# 多开线程收益直接；本地 SSD 上线程大多空转，也无副作用
+SCAN_WORKERS = 16
 
-        # ---- 优先级1：jpg 与 json 一一对应 ----
-        if cfg['pairing']:
-            for stem in sorted(set(jpgs) - set(jsons)):
-                errors.append((jpgs[stem], '缺少json文件', ''))
-            for stem in sorted(set(jsons) - set(jpgs)):
-                errors.append((jsons[stem], '缺少jpg文件', ''))
-            targets = sorted(set(jpgs) & set(jsons))
-        else:
-            targets = sorted(jsons)
-        dir_targets.append([jsons[s] for s in targets])
+
+def scan_dirs(root, cfg, stop_event=None):
+    """并行遍历 root（支持多层嵌套），返回 (各目录待检 json 路径列表, 配对报错列表)。
+    先收集完所有目录再统一检测，避免逐目录等待导致并行度不足。
+    网络盘上每个目录的枚举都是一次网络往返，单线程 os.walk 目录一多就被
+    延迟拖垮，这里逐层并行枚举（同层目录同时下探）；
+    结果按目录路径排序，多次运行的报错顺序稳定一致"""
+    def scan_one(dirpath):
+        """枚举单个目录，返回 (子目录列表, jpg表, json表)；
+        目录读不了（权限/断连）按空处理，不中断整个扫描"""
+        subdirs, jpgs, jsons = [], {}, {}
+        try:
+            with os.scandir(dirpath) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            subdirs.append(entry.path)
+                            continue
+                        name = entry.name
+                    except OSError:
+                        continue
+                    stem, ext = os.path.splitext(name)
+                    ext = ext.lower()
+                    if ext in ('.jpg', '.jpeg'):
+                        jpgs[stem] = os.path.join(dirpath, name)
+                    elif ext == '.json':
+                        jsons[stem] = os.path.join(dirpath, name)
+        except OSError:
+            pass
+        return subdirs, jpgs, jsons
+
+    found = []       # (dirpath, json路径列表, 配对报错列表)
+    level = [root]   # 当前层的目录，逐层向下
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+        while level:
+            if stop_event is not None and stop_event.is_set():
+                break
+            next_level = []
+            # 同层目录并行枚举（pool.map 结果顺序与 level 一致）
+            for dirpath, (subdirs, jpgs, jsons) in zip(level, pool.map(scan_one, level)):
+                # ---- 优先级1：jpg 与 json 一一对应 ----
+                if cfg['pairing']:
+                    pair_errs = []
+                    for stem in sorted(set(jpgs) - set(jsons)):
+                        pair_errs.append((jpgs[stem], '缺少json文件', ''))
+                    for stem in sorted(set(jsons) - set(jpgs)):
+                        pair_errs.append((jsons[stem], '缺少jpg文件', ''))
+                    targets = sorted(set(jpgs) & set(jsons))
+                else:
+                    pair_errs = []
+                    targets = sorted(jsons)
+                found.append((dirpath, [jsons[s] for s in targets], pair_errs))
+                next_level.extend(subdirs)
+            level = sorted(next_level)
+    found.sort(key=lambda item: item[0])   # 按目录路径排序，输出顺序稳定
+    dir_targets = [targets for _, targets, _ in found]
+    errors = [e for _, _, pair_errs in found for e in pair_errs]
     return dir_targets, errors
 
 
@@ -865,13 +987,21 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
     total = len(paths)
     log(f'[信息] 扫描完成：共 {n_dirs} 个文件夹、{total} 个待检 json')
 
+    # 结果缓存：未修改的文件（修改时间/大小不变）且配置指纹一致时
+    # 直接复用上次结果；开关关闭（cache=None）则全量检测
+    cache = load_result_cache() if cfg.get('cache', True) else None
+    fingerprint = cache_fingerprint(cfg)
+    cache_stats = []          # 'hit' / 'miss' 标记（append 原子，线程安全够用）
+
     n_json = 0
     n_deleted = 0
     # 大批量小文件以读盘为主，多线程并行解析 json 可显著提速；
     # stop_event 传入 check_json：请求停止后尚未开始的任务直接跳过
     max_workers = min(8, os.cpu_count() or 1)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = iter(pool.map(lambda p: safe_check_json(p, cfg, stop_event), paths))
+        results = iter(pool.map(
+            lambda p: check_json_cached(p, cfg, stop_event, cache,
+                                        fingerprint, cache_stats), paths))
         stopped = False
         for targets in dir_targets:
             if stopped:
@@ -890,6 +1020,11 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
                     for etype, detail in file_errors:
                         all_errors.append((jpath, etype, detail))
                         log(f'  ✗ {os.path.basename(jpath)} ← {etype}：{detail}')
+
+    if cache is not None:
+        log(f'[信息] 结果缓存：命中 {cache_stats.count("hit")} 个，'
+            f'实际检测 {cache_stats.count("miss")} 个')
+        save_result_cache(cache)
 
     # 未注册箱主代码通过其余全部检测 → 已自动入库，汇总提示（不产生报错行）
     if _NEW_BIC:
@@ -1190,13 +1325,18 @@ class CheckerApp:
         if last_root and os.path.isdir(last_root):
             self.set_root(last_root)
 
-        frm_opts = tk.LabelFrame(master, text='输出选项', padx=10, pady=6)
+        frm_opts = tk.LabelFrame(master, text='输出与性能选项', padx=10, pady=6)
         frm_opts.pack(fill='x', padx=10, pady=4)
         self.chk_macro = tk.BooleanVar(value=True)
         tk.Checkbutton(
             frm_opts, variable=self.chk_macro,
             text='生成带宏 Excel（.xlsm，双击文件地址打开 LabelMe 列表并定位到该行，可上下切换）'
         ).grid(row=0, column=0, sticky='w', pady=2)
+        self.chk_cache = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            frm_opts, variable=self.chk_cache,
+            text='结果缓存（重跑时未修改的文件直接复用上次结果，配置改动后自动全量重检）'
+        ).grid(row=1, column=0, sticky='w', pady=2)
 
         frm_checks = tk.LabelFrame(master, text='检测项开关（按优先级顺序执行，命中即停）', padx=10, pady=6)
         frm_checks.pack(fill='x', padx=10, pady=4)
@@ -1331,6 +1471,7 @@ class CheckerApp:
 
         cfg = {k: v.get() for k, v in self.cfg_vars.items()}
         cfg['macro'] = self.chk_macro.get()     # 输出选项：是否带宏
+        cfg['cache'] = self.chk_cache.get()     # 性能选项：是否启用结果缓存
         if not any(v.get() for v in self.cfg_vars.values()):
             messagebox.showwarning('提示', '所有检测项均已关闭，将不会产生任何报错。')
 
