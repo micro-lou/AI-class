@@ -41,7 +41,8 @@
      校验位 > 箱型，命中报错后停止该文件后续检测，开始下一文件
 
 用法：
-  图形界面：python 箱号标签校验.py
+  图形界面：python 箱号标签校验.py（exe 也可把待检文件夹直接拖到图标上启动；
+  上次的待检文件夹与输出目录自动记忆，下次启动预填）
   命令行：  python 箱号标签校验.py --cli --root <文件夹> [--out <输出.xlsm>]
 """
 
@@ -810,13 +811,25 @@ def normalize_out(out_xlsx, macro=True):
     return out_xlsx
 
 
-def precheck_output(out_xlsx):
+def precheck_output(out_xlsx, macro=True):
     """检测开始前预检 Excel 输出，返回错误信息（无问题返回 None）：
-    openpyxl 是否安装、目标文件是否被 Excel 打开锁定、所在目录是否可写"""
+    openpyxl 是否安装、目标文件是否被 Excel 打开锁定、所在目录是否可写；
+    macro=True 时一并预检宏模板能否读取（损坏则提前报错，
+    免得整趟扫描跑完后写 Excel 时才发现）"""
     try:
         from openpyxl import Workbook
     except ImportError:
         return '未安装 openpyxl（pip install openpyxl），无法生成 Excel'
+    if macro:
+        tmpl = template_path()
+        if tmpl:
+            try:
+                from openpyxl import load_workbook
+                load_workbook(tmpl, keep_vba=True)
+            except Exception as e:
+                return (f'宏模板 {os.path.basename(tmpl)} 读取失败'
+                        f'（{type(e).__name__}: {e}）；请修复或删除该模板，'
+                        f'或关闭「生成带宏 Excel」后重试')
     try:
         if os.path.exists(out_xlsx):     # 已有文件被 Excel 打开时处于锁定状态
             with open(out_xlsx, 'a'):
@@ -839,15 +852,18 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
     out_xlsx = normalized
 
     # 先预检输出，避免整趟扫描跑完后才发现写不了 Excel
-    err = precheck_output(out_xlsx)
+    err = precheck_output(out_xlsx, cfg.get('macro', True))
     if err:
         raise ValueError(err)
 
     # 先一次性收集所有目录与 json 路径，再整体提交线程池并行解析
     _NEW_BIC.clear()          # 本次运行的自动入库记录（结束前汇总打日志）
+    log('[信息] 正在扫描待检文件夹…')
     dir_targets, all_errors = scan_dirs(root, cfg, stop_event)
     n_dirs = len(dir_targets)
     paths = [p for targets in dir_targets for p in targets]
+    total = len(paths)
+    log(f'[信息] 扫描完成：共 {n_dirs} 个文件夹、{total} 个待检 json')
 
     n_json = 0
     n_deleted = 0
@@ -865,6 +881,9 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
                     stopped = True
                     break
                 n_json += 1
+                # 大批量时定期报进度，避免长时间无输出看似卡死
+                if n_json % PROGRESS_EVERY == 0 and n_json < total:
+                    log(f'[进度] 已检测 {n_json} / {total}')
                 file_errors = next(results)
                 # 检测正常的文件不打日志，日志框只显示报错信息
                 if file_errors:
@@ -890,7 +909,8 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
             except OSError as e:
                 log(f'[清理] 删除失败 {dirpath}：{e}')
 
-    write_excel(out_xlsx, all_errors, macro=cfg.get('macro', True))
+    out_xlsx = write_excel(out_xlsx, all_errors, macro=cfg.get('macro', True),
+                           log=log)
 
     return {
         'dirs': n_dirs,
@@ -901,19 +921,33 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
     }
 
 
-def write_excel(path, errors, macro=True):
+def write_excel(path, errors, macro=True, log=None):
     """报错写入 Excel：文件地址 / 是否修改完成（留空人工填）/ 备注。
     macro=True 且有宏模板时输出带宏 .xlsm：双击 A 列文件地址以列表模式打开
     LabelMe（整表按顺序切换，见 labelme批量打开.py）；宏参数存隐藏列 Z
     （Z2 LabelMe 完整路径、Z3 Python 解释器完整路径），
     并把启动脚本释放到输出文件同目录。
-    宏开关关闭或模板缺失时降级为普通 .xlsx（无上述打开功能）"""
+    宏开关关闭或模板缺失时降级为普通 .xlsx（无上述打开功能）。
+    返回实际写出的路径：宏模板损坏时同样降级普通 .xlsx（换扩展名并打日志），
+    保证已扫出的检测结果不丢"""
     from openpyxl import Workbook, load_workbook
     from openpyxl.styles import Font, Alignment
 
     tmpl = template_path() if macro else None
+    wb = None
     if tmpl:
-        wb = load_workbook(tmpl, keep_vba=True)   # keep_vba=True 保留宏
+        try:
+            wb = load_workbook(tmpl, keep_vba=True)   # keep_vba=True 保留宏
+        except Exception as e:
+            # 模板损坏：降级普通 .xlsx（普通工作簿存 .xlsm 会报格式不符），
+            # 宁可丢宏功能也不能丢整趟检测结果
+            if log:
+                log(f'[警告] 宏模板读取失败（{type(e).__name__}: {e}），'
+                    f'降级输出普通 .xlsx')
+            if path.lower().endswith('.xlsm'):
+                path = path[:-len('.xlsm')] + '.xlsx'
+            tmpl = None
+    if tmpl:
         ws = wb.active
     else:
         wb = Workbook()
@@ -946,16 +980,42 @@ def write_excel(path, errors, macro=True):
             except OSError:
                 pass
     wb.save(path)
+    return path
 
 
 # ============================ 图形界面 ============================
 
 DESKTOP = os.path.join(os.path.expanduser('~'), 'Desktop')
 
+SETTINGS_PATH = os.path.join(app_dir(), '界面设置.json')
+
+
+def load_ui_settings():
+    """启动时读取界面记忆设置（上次待检文件夹 / 输出目录）；无文件或损坏返回空"""
+    try:
+        with open(SETTINGS_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+
+
+def save_ui_settings(root, out_dir):
+    """记住上次的待检文件夹与输出目录，下次启动时预填；保存失败不影响使用"""
+    try:
+        with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
+            json.dump({'root': root, 'out_dir': out_dir}, f,
+                      ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+
+
 # 大批量检测时的界面保护：日志区最多保留行数（超出删最旧的）、
 # 单次 _poll 最多刷入条数（其余留给下一轮，避免长时间霸占 UI 线程）
 MAX_LOG_LINES = 5000
 LOG_BATCH_LIMIT = 300
+# 进度日志间隔：每检测多少个 json 报一次进度，避免长时间无输出看似卡死
+PROGRESS_EVERY = 500
 
 CHECK_ITEMS = [
     ('pairing',   'jpg/json 文件对应检测'),
@@ -1110,15 +1170,25 @@ class CheckerApp:
         self.running = False
         self._set_wins = {}   # 已打开的集合管理窗口（箱型代码 / 豁免标签 / 箱主代码）
 
+        # 上次的输出目录（界面设置记忆），首次使用为桌面
+        settings = load_ui_settings()
+        self.out_dir = settings.get('out_dir') or DESKTOP
+        if not os.path.isdir(self.out_dir):
+            self.out_dir = DESKTOP
+
         frm_paths = tk.Frame(master, padx=10, pady=8)
         frm_paths.pack(fill='x')
         self.ent_root, _ = self._path_row(frm_paths, 0, '待检文件夹：', self._pick_dir)
-        default_out = os.path.join(DESKTOP, f'报错汇总_{datetime.now():%Y%m%d_%H%M%S}.xlsm')
+        default_out = os.path.join(self.out_dir, f'报错汇总_{datetime.now():%Y%m%d_%H%M%S}.xlsm')
         self.ent_out, _ = self._path_row(frm_paths, 1, '输出Excel：', self._pick_out)
         self.ent_out.insert(0, default_out)
         # 最近一次自动生成的默认输出路径；输入框内容与之相同（或为空）即视为
         # 未自定义，仍随所选文件夹自动更新，方向键等按键不会造成误判
         self._out_default = default_out
+        # 上次的待检文件夹仍存在时预填（把文件夹拖到 exe 图标上启动也走这里）
+        last_root = settings.get('root', '')
+        if last_root and os.path.isdir(last_root):
+            self.set_root(last_root)
 
         frm_opts = tk.LabelFrame(master, text='输出选项', padx=10, pady=6)
         frm_opts.pack(fill='x', padx=10, pady=4)
@@ -1165,29 +1235,37 @@ class CheckerApp:
         return ent, btn
 
     def _pick_dir(self):
-        d = filedialog.askdirectory(initialdir=DESKTOP)
+        d = filedialog.askdirectory(
+            initialdir=self.ent_root.get().strip() or DESKTOP)
         if d:
-            self.ent_root.delete(0, 'end')
-            self.ent_root.insert(0, d)
-            # 用户未自定义过输出地址时，随所选文件夹自动更新默认值（生成在桌面）
-            cur = self.ent_out.get()
-            if not cur.strip() or cur == self._out_default:
-                name = os.path.basename(os.path.normpath(d))
-                default_out = os.path.join(
-                    DESKTOP, f'{name}_报错汇总_{datetime.now():%Y%m%d_%H%M%S}.xlsx')
-                self.ent_out.delete(0, 'end')
-                self.ent_out.insert(0, default_out)
-                self._out_default = default_out
+            self.set_root(d)
+
+    def set_root(self, d):
+        """填入待检文件夹并联动默认输出文件名（浏览选择 / 启动预填 /
+        文件夹拖到 exe 图标上启动共用）。用户未自定义过输出地址时，
+        随所选文件夹自动更新默认值（生成在上次使用的输出目录）"""
+        self.ent_root.delete(0, 'end')
+        self.ent_root.insert(0, d)
+        cur = self.ent_out.get()
+        if not cur.strip() or cur == self._out_default:
+            name = os.path.basename(os.path.normpath(d))
+            default_out = os.path.join(
+                self.out_dir, f'{name}_报错汇总_{datetime.now():%Y%m%d_%H%M%S}.xlsx')
+            self.ent_out.delete(0, 'end')
+            self.ent_out.insert(0, default_out)
+            self._out_default = default_out
 
     def _pick_out(self):
         f = filedialog.asksaveasfilename(defaultextension='.xlsm',
                                          filetypes=[('Excel 工作簿（带宏，支持点击打开 LabelMe）', '*.xlsm'),
                                                     ('Excel 工作簿', '*.xlsx')],
-                                         initialdir=DESKTOP)
+                                         initialdir=self.out_dir)
         if f:
             # 用户已自行选择 Excel 生成地址（与默认值不同），之后不再自动覆盖
             self.ent_out.delete(0, 'end')
             self.ent_out.insert(0, f)
+            # 记住用户选择的输出目录，作为之后默认输出的生成位置
+            self.out_dir = os.path.dirname(f) or DESKTOP
 
     # ==================== 箱型代码 / 豁免标签 / 箱主代码管理（增删改查） ====================
 
@@ -1255,6 +1333,9 @@ class CheckerApp:
         cfg['macro'] = self.chk_macro.get()     # 输出选项：是否带宏
         if not any(v.get() for v in self.cfg_vars.values()):
             messagebox.showwarning('提示', '所有检测项均已关闭，将不会产生任何报错。')
+
+        # 记住本次待检文件夹与输出目录，下次启动时预填
+        save_ui_settings(root, os.path.dirname(out) or DESKTOP)
 
         self.running = True
         self.stop_event.clear()
@@ -1360,7 +1441,10 @@ def main():
         run_cli(parser.parse_args())
     else:
         root = tk.Tk()
-        CheckerApp(root)
+        app = CheckerApp(root)
+        # 资源管理器把文件夹拖到 exe 图标上启动时，argv[1] 为该文件夹路径
+        if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
+            app.set_root(os.path.abspath(sys.argv[1]))
         root.mainloop()
 
 
