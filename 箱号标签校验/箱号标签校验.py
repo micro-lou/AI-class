@@ -17,7 +17,8 @@
        多出的按与序列号距离截断，视为危险标识不参与组装）；
        逗号写反的类别标签（如 "1,"）框同样参与分组，但报错提示改正
      - 标签一致性用完整 11 位箱号整体比对（组内两两比对，不拆分成三段）：
-       组装出的多个完整箱号只差一或两位 → 报错（标签不一致）；
+       组装出的多个完整箱号只差一或两位 → 报错（标签不一致），
+       并分别验算两者校验位判定哪个正确，备注给出修改意见；
        相差超过两位 → 判定为不同的箱子，各自检测校验位
      - 箱号缺位 / 格式不符（应为 4 字母[第4位固定U] + 6 数字 + 1 校验位，共 11 位）→ 报错
      - 按 ISO 6346 验算校验位 → 校验位错误
@@ -166,6 +167,30 @@ def calc_container_check(code10):
         total += val * (2 ** idx)
     rem = total % 11
     return 0 if rem == 10 else rem
+
+
+def number_pair_error(a, b, d):
+    """两个完整箱号只差 1~2 位 → 标签不一致。分别验算两个箱号的校验位，
+    判定哪个更可能正确，在备注中给出修改意见而非仅报相差位数：
+    - 一对一错：错的那个应以对的为准修改
+    - 只在校验位上不同：其一必错（前10位相同校验位唯一），结论确定
+    - 都对（差异位在前10位）或都错：无法自动判定，提示人工核对"""
+    ok_a = calc_container_check(a[:10]) == int(a[10])
+    ok_b = calc_container_check(b[:10]) == int(b[10])
+    base = f'{a} / {b}（相差{d}位）'
+    if ok_a and not ok_b:
+        tip = f'{b} 应改为 {a}'
+    elif ok_b and not ok_a:
+        tip = f'{a} 应改为 {b}'
+    elif ok_a and ok_b:
+        tip = '两者校验位均正确，无法自动判定，需人工核对'
+    else:
+        exp_a = a[:10] + str(calc_container_check(a[:10]))
+        exp_b = b[:10] + str(calc_container_check(b[:10]))
+        # 前10位相同时只提示一次（两个错误箱号对应同一个正确箱号）
+        exp = exp_a if exp_a == exp_b else f'{exp_a} 或 {exp_b}'
+        tip = f'两者校验位均错误，应为 {exp}，需人工核对'
+    return ('标签不一致', f'{base}，{tip}')
 
 
 # ============================ 标签分类 ============================
@@ -365,15 +390,15 @@ def assemble_group(group, truncate_extra=False):
             numbers = sorted(set(numbers))
 
     # ---- 组内标签一致性检测（完整 11 位箱号整体比对，不拆分成三段）----
-    # 组装出的多个完整箱号两两比对：只差一或两位 → 同一箱子的标签标注不一致；
+    # 组装出的多个完整箱号两两比对：只差一或两位 → 同一箱子的标签标注不一致，
+    # 分别验算两个箱号的校验位判定哪个更可能正确，备注给出修改意见；
     # 相差超过两位 → 判定为不同的箱子，各自参与后续校验位检测
     pair_errors = []
     for i in range(len(numbers)):
         for j in range(i + 1, len(numbers)):
             d = diff_chars(numbers[i], numbers[j])
             if d <= 2:
-                pair_errors.append(('标签不一致',
-                                    f'{numbers[i]} / {numbers[j]}（相差{d}位）'))
+                pair_errors.append(number_pair_error(numbers[i], numbers[j], d))
     if len(numbers) <= 1:
         # 单个箱号时箱型代码也应一致：两个箱型只差一两位 → 标签不一致
         # （多个箱号时不同箱型属正常，仅在箱型检测中校验是否在代码表中）
@@ -471,6 +496,8 @@ def check_json(path, cfg, stop_event=None):
     all_types = sorted(set(all_types))
 
     # ---- 优先级3：标签一致性（组内已比对，命中即停）----
+    # 箱号不一致的报错已附带校验位比对结论（见 number_pair_error），
+    # 可直接按备注中的修改意见处理，无需再跑优先级5的单独校验位检测
     if cfg['pair'] and pair_errors:
         return pair_errors
 
@@ -701,7 +728,7 @@ LOG_BATCH_LIMIT = 300
 CHECK_ITEMS = [
     ('pairing',   'jpg/json 文件对应检测'),
     ('suffix',    '_fz/_oc 后缀检测（关闭时含此类标签的文件直接跳过）'),
-    ('pair',      '标签一致性检测（按类别框分组，组内完整箱号比对只差1~2位）'),
+    ('pair',      '标签一致性检测（组内完整箱号比对只差1~2位，备注按校验位给出修改意见）'),
     ('digits',    '箱号缺位/位数检测'),
     ('checkdigit', '校验位检测（ISO 6346）'),
     ('typecode',  '箱型检测（写错/缺失报错，含豁免标签时缺箱型放行）'),
