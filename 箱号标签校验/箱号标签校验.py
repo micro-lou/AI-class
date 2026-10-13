@@ -20,7 +20,13 @@
        组装出的多个完整箱号只差一或两位 → 报错（标签不一致），
        并分别验算两者校验位判定哪个正确，备注给出修改意见；
        相差超过两位 → 判定为不同的箱子，各自检测校验位
-     - 箱号缺位 / 格式不符（应为 4 字母[第4位固定U] + 6 数字 + 1 校验位，共 11 位）→ 报错
+     - 箱号缺位 / 格式不符（应为 4 字母[第4位为设备类型码U/J/Z] + 6 数字 +
+       1 校验位，共 11 位）→ 报错
+     - 箱主代码前 3 位与 BIC 注册箱主代码比对，不在表中时按相近代码给出
+       修改建议；第 4 位设备类型码仅允许 U（货运集装箱）/ J（可拆卸集装箱
+       配件）/ Z（底盘车/拖车）；未注册箱主代码若通过其余全部检测则视为
+       新箱主自动入库不报错；BIC 代码可在界面增删改查，
+       改动保存到同目录 BIC箱主代码配置.json
      - 按 ISO 6346 验算校验位 → 校验位错误
      - 箱型代码已内置（源自 箱型代码全.xls），写错必报错；缺箱型报错，
        但标签含豁免数字标签（默认 ,1 ,6 ,10 等，可管理）时允许缺箱型；
@@ -30,8 +36,8 @@
      输出开关（默认开，可关闭）：
      - 带宏 Excel：输出带宏 .xlsm（需同目录或内置 报错模板.xlsm），
        双击 A 列文件地址用 LabelMe 单独打开该文件；关闭则输出普通 .xlsx
-  5. 检测按优先级执行：jpg&json对应 > 后缀 > 完整箱号一致性 > 缺位 > 校验位 > 箱型，
-     命中报错后停止该文件后续检测，开始下一文件
+  5. 检测按优先级执行：jpg&json对应 > 后缀 > 完整箱号一致性 > 缺位 > 箱主代码 >
+     校验位 > 箱型，命中报错后停止该文件后续检测，开始下一文件
 
 用法：
   图形界面：python 箱号标签校验.py
@@ -155,6 +161,85 @@ def set_exempt_labels(labels):
 
 EXEMPT_LABELS = load_exempt_labels()
 
+BIC_PATH = os.path.join(app_dir(), 'BIC箱主代码配置.json')
+
+# 设备类型码（箱主代码第4位，ISO 6346）：仅允许以下三种
+EQUIPMENT_CODES = {
+    'U': '货运集装箱',
+    'J': '可拆卸集装箱配件',
+    'Z': '底盘车/拖车',
+}
+
+
+# BIC 注册箱主代码前缀（内置默认值，源自 BIC箱主代码.csv，取代码前 3 位；
+# 标签中的箱主代码第 4 位为设备类型码，仅比对前 3 位）
+BASE_BIC_PREFIXES = frozenset({
+    'MAE', 'MSC', 'CMD', 'CMA', 'COS', 'HLC', 'ONE', 'EIS', 'YML', 'HDM',
+    'PIL', 'ZIM', 'RCL', 'WHL', 'SIT', 'TSH', 'KMT', 'SNK', 'MAT', 'APL',
+    'OOL', 'NYK', 'MOL', 'CSA', 'CCN', 'SML', 'MIS', 'HJS', 'SEA', 'IRS',
+    'MES', 'SIN', 'CUL', 'MAR', 'ACL', 'MAC', 'CSC', 'FSC', 'SAF', 'SAA',
+    'CNC', 'PAB', 'DRC', 'CLH', 'NAX', 'BLK', 'VIN', 'HHL', 'MML', 'SLL',
+    'CCL', 'KOR', 'TSL', 'SCN', 'NFF', 'NJT', 'KRL', 'TCL', 'CAI', 'TRI',
+    'BRI', 'FES', 'GWD', 'ITL', 'UES', 'XES', 'PRS', 'CRX', 'WFL', 'MEB',
+    'CFL', 'SNC', 'SEG', 'DOL', 'ALI', 'CAR', 'GES', 'STA', 'AML', 'SCZ',
+    'RIL', 'NCL', 'SHL', 'CLL', 'LOJ', 'MCN', 'ESP', 'CLA', 'RZD', 'KZR',
+    'KLR', 'KBS', 'BNS', 'CSX', 'NSC', 'CPC', 'CNR', 'GMR', 'IBG', 'MGR',
+    'SCM', 'ASU', 'NEX', 'EXF', 'DHL', 'DSL', 'GEL', 'NVO', 'KLU', 'JKL',
+    'ARC', 'RFU', 'SNR', 'UPU', 'EKU', 'JRU', 'KNU',
+})
+
+
+def valid_bic_prefix(s):
+    """BIC 箱主代码前缀须为 3 位字母"""
+    return bool(re.fullmatch(r'[A-Z]{3}', str(s).strip().upper()))
+
+
+def load_bic_prefixes():
+    """启动时读取一次 BIC 箱主代码配置；无配置文件时使用内置默认值"""
+    try:
+        with open(BIC_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return BASE_BIC_PREFIXES
+        # 逐条校验格式，过滤手改配置文件时可能混入的脏数据
+        return frozenset(p for p in (str(s).strip().upper() for s in data)
+                         if valid_bic_prefix(p))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return BASE_BIC_PREFIXES
+
+
+def set_bic_prefixes(prefixes):
+    """更新 BIC 箱主代码（全局生效）并持久化到配置文件，返回 (是否成功, 提示)"""
+    global BIC_PREFIXES
+    BIC_PREFIXES = frozenset(prefixes)
+    try:
+        with open(BIC_PATH, 'w', encoding='utf-8') as f:
+            json.dump(sorted(BIC_PREFIXES), f, ensure_ascii=False, indent=1)
+        return True, f'已保存 {len(BIC_PREFIXES)} 个箱主代码'
+    except OSError as e:
+        return False, f'保存到配置文件失败：{e}'
+
+
+BIC_PREFIXES = load_bic_prefixes()
+
+# 自动入库的锁与本次运行新增记录（check_json 在线程池中并发调用，
+# 需加锁避免多个线程同时写配置文件；_NEW_BIC 供检测结束后汇总打日志）
+BIC_LOCK = threading.Lock()
+_NEW_BIC = set()
+
+
+def auto_add_bic_prefixes(prefixes):
+    """把通过其余全部检测的未注册箱主代码前缀自动加入注册表并持久化；
+    返回本次实际新增的前缀集合（已存在的不重复添加）"""
+    global BIC_PREFIXES
+    with BIC_LOCK:
+        new = set(prefixes) - BIC_PREFIXES
+        if not new:
+            return set()
+        set_bic_prefixes(BIC_PREFIXES | new)
+        _NEW_BIC.update(new)
+        return new
+
 
 def calc_container_check(code10):
     """按 ISO 6346 计算箱号前 10 位（箱主代码4位 + 序列号6位）的校验位"""
@@ -193,9 +278,40 @@ def number_pair_error(a, b, d):
     return ('标签不一致', f'{base}，{tip}')
 
 
+def equipment_code_error(owner):
+    """箱主代码第 4 位设备类型码检测：仅允许 U/J/Z
+    （货运集装箱/可拆卸集装箱配件/底盘车/拖车），非法返回报错，否则 None"""
+    equip = owner[3]
+    if equip in EQUIPMENT_CODES:
+        return None
+    names = '/'.join(f'{k}{v}' for k, v in EQUIPMENT_CODES.items())
+    return ('箱主代码错误', f'{owner} 第4位"{equip}"非设备类型码，应为 {names}')
+
+
+def bic_prefix_error(owner):
+    """箱主代码前 3 位与 BIC 注册表比对：已注册返回 None；
+    未注册返回报错——存在只差 1 位的注册代码时给出修改建议"""
+    prefix = owner[:3]
+    if prefix in BIC_PREFIXES:
+        return None
+    # 只差 1 位的注册代码 → 给出修改建议（按字母序取全部，一般只有 0~3 个）
+    near = sorted(p for p in BIC_PREFIXES if diff_chars(prefix, p) == 1)
+    if near:
+        return ('箱主代码错误',
+                f'{owner} 前3位"{prefix}"不在BIC注册箱主代码中，'
+                f'疑似"{prefix}"应为 "{" / ".join(near)}"，需人工核对')
+    return ('箱主代码错误', f'{owner} 前3位"{prefix}"不在BIC注册箱主代码中，需人工核对')
+
+
 # ============================ 标签分类 ============================
 
-RE_FULL = re.compile(r'^[A-Z]{3}U\d{7}$')     # 完整 11 位箱号
+# 完整 11 位箱号（第4位设备类型码不限字母，非 U/J/Z 的由优先级5检测报错）
+RE_FULL = re.compile(r'^[A-Z]{4}\d{7}$')
+
+
+def valid_owner_label(s):
+    """箱主代码标签合法：4 位字母且第 4 位为设备类型码 U/J/Z"""
+    return len(s) == 4 and s[3] in EQUIPMENT_CODES and s.isalpha()
 RE_OWNER = re.compile(r'^[A-Z]{3,4}$')        # 箱主代码（3~4 位字母）
 RE_DIGITS = re.compile(r'^\d+$')
 
@@ -357,9 +473,9 @@ def assemble_group(group, truncate_extra=False):
             if not cands:
                 format_errors.append(('箱号位数缺失', f'缺少{name}标签'))
         for o_val in {v for v, _ in owner_c}:
-            if not (len(o_val) == 4 and o_val[3] == 'U'):
+            if not valid_owner_label(o_val):
                 format_errors.append(('箱号位数缺失',
-                                      f'箱主代码"{o_val}"格式错误（应为3字母+U）'))
+                                      f'箱主代码"{o_val}"格式错误（应为3字母+U/J/Z）'))
         if owner_c and serial_c and check_c:
             # 兜底（无类别框时的全局组）：合并后的单数字标签数多于箱号组数
             # （箱主代码/序列号合并后的较大值）时，多出的单数字并非校验位而是
@@ -375,7 +491,7 @@ def assemble_group(group, truncate_extra=False):
             if len({v for v, _ in serial_c}) == 1:
                 # 序列号唯一：与每个箱主代码 / 校验位候选各组合出一个完整箱号
                 s_val = next(iter({v for v, _ in serial_c}))
-                for o in {v for v, _ in owner_c if len(v) == 4 and v[3] == 'U'}:
+                for o in {v for v, _ in owner_c if valid_owner_label(v)}:
                     for k in {v for v, _ in check_c}:
                         numbers.append(o + s_val + k)
             else:
@@ -385,7 +501,7 @@ def assemble_group(group, truncate_extra=False):
                             + (c[1][1] - s_cen[1]) ** 2)
                     k = min(check_c, key=lambda c: (c[1][0] - s_cen[0]) ** 2
                             + (c[1][1] - s_cen[1]) ** 2)
-                    if len(o[0]) == 4 and o[0][3] == 'U':
+                    if valid_owner_label(o[0]):
                         numbers.append(o[0] + s_val + k[0])
             numbers = sorted(set(numbers))
 
@@ -480,8 +596,9 @@ def check_json(path, cfg, stop_event=None):
     # 逐组配对、组装完整 11 位箱号并做组内一致性比对，结果汇总
     pair_errors = []    # 标签不一致报错（优先级3）
     format_errors = []  # 缺位 / 位数报错（优先级4）
-    numbers = []        # 各组组装出的完整箱号（优先级5用）
-    all_types = []      # 各组的箱型代码（优先级6用）
+    numbers = []        # 各组组装出的完整箱号（优先级6校验位用）
+    all_types = []      # 各组的箱型代码（优先级7箱型用）
+    owners = []         # 各组的箱主代码（完整箱号前4位，优先级5用）
     for group in groups:
         # 无类别框时唯一一组为全局组，启用单数字危险标识截断兜底
         res = assemble_group(group, truncate_extra=not category_boxes)
@@ -490,10 +607,12 @@ def check_json(path, cfg, stop_event=None):
         g_numbers, g_types, g_pairs, g_fmts = res
         numbers.extend(g_numbers)
         all_types.extend(g_types)
+        owners.extend(n[:4] for n in g_numbers)
         pair_errors.extend(g_pairs)
         format_errors.extend(g_fmts)
     numbers = sorted(set(numbers))
     all_types = sorted(set(all_types))
+    owners = sorted(set(owners))
 
     # ---- 优先级3：标签一致性（组内已比对，命中即停）----
     # 箱号不一致的报错已附带校验位比对结论（见 number_pair_error），
@@ -508,29 +627,56 @@ def check_json(path, cfg, stop_event=None):
     if cfg['digits'] and format_errors:
         return format_errors
 
-    # ---- 优先级5：校验位检测 ----
-    if cfg['checkdigit'] and numbers:
-        cd_errors = []
+    # ---- 优先级5：箱主代码检测（前3位比对BIC注册表，第4位限U/J/Z）----
+    # 前 3 位未注册的箱主代码先记下不立即报：其余检测（校验位/箱型）全部
+    # 通过时视为新箱主，自动加入注册表且不报错；否则按优先级照常报错。
+    # 第 4 位设备类型码错误属格式错误，必报且不参与自动入库豁免。
+    oc_errors = []             # 箱主代码报错
+    equip_bad = False          # 是否存在设备类型码错误（必报）
+    unknown_prefixes = set()   # 未注册的箱主代码前3位（候选自动入库）
+    if cfg['ownercode']:
+        for owner in owners:
+            eq_err = equipment_code_error(owner)
+            if eq_err:
+                equip_bad = True
+                oc_errors.append(eq_err)
+                continue
+            p_err = bic_prefix_error(owner)
+            if p_err:
+                oc_errors.append(p_err)
+                unknown_prefixes.add(owner[:3])
+        if equip_bad:
+            return oc_errors
+
+    # ---- 优先级6：校验位检测 ----
+    cd_errors = []
+    if cfg['checkdigit']:
         for num in numbers:
             expect = calc_container_check(num[:10])
             actual = int(num[10])
             if expect != actual:
                 cd_errors.append(('校验位错误', f'{num} 校验位应为{expect}，实际为{actual}'))
-        if cd_errors:
-            return cd_errors
 
-    # ---- 优先级6：箱型检测（写错必报；缺箱型默认报错，含豁免数字标签时放行）----
+    # ---- 优先级7：箱型检测（写错必报；缺箱型默认报错，含豁免数字标签时放行）----
+    tc_errors = []
     if cfg['typecode']:
-        tc_errors = []
-        types = all_types
-        for t in types:
+        for t in all_types:
             if t not in TYPE_CODES:
                 tc_errors.append(('箱型不存在', f'{t} 不在国标箱型代码表中'))
-        if not types and not type_exempt:
+        if not all_types and not type_exempt:
             tc_errors.append(('缺少箱型', '未找到箱型代码标签（含豁免标签时放行，可在「豁免标签管理」中配置）'))
-        if tc_errors:
-            return tc_errors
 
+    # 按优先级返回最先命中的报错：箱主代码（5）> 校验位（6）> 箱型（7）
+    if oc_errors and (cd_errors or tc_errors):
+        return oc_errors
+    if cd_errors:
+        return cd_errors
+    if tc_errors:
+        return tc_errors
+
+    # 其余检测全部通过：未注册箱主代码视为新箱主，自动加入注册表且不报错
+    if unknown_prefixes:
+        auto_add_bic_prefixes(unknown_prefixes)
     return []
 
 
@@ -630,6 +776,7 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
         raise ValueError(err)
 
     # 先一次性收集所有目录与 json 路径，再整体提交线程池并行解析
+    _NEW_BIC.clear()          # 本次运行的自动入库记录（结束前汇总打日志）
     dir_targets, all_errors = scan_dirs(root, cfg, stop_event)
     n_dirs = len(dir_targets)
     paths = [p for targets in dir_targets for p in targets]
@@ -656,6 +803,11 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
                     for etype, detail in file_errors:
                         all_errors.append((jpath, etype, detail))
                         log(f'  ✗ {os.path.basename(jpath)} ← {etype}：{detail}')
+
+    # 未注册箱主代码通过其余全部检测 → 已自动入库，汇总提示（不产生报错行）
+    if _NEW_BIC:
+        log(f'[信息] {len(_NEW_BIC)} 个未注册箱主代码已通过其余检测，'
+            f'自动加入注册表：{"、".join(sorted(_NEW_BIC))}')
 
     # 删除空文件夹（自底向上，删掉子文件夹后父文件夹若变空也一并删除）
     if cfg['cleanup'] and not stop_event.is_set():
@@ -730,6 +882,7 @@ CHECK_ITEMS = [
     ('suffix',    '_fz/_oc 后缀检测（关闭时含此类标签的文件直接跳过）'),
     ('pair',      '标签一致性检测（组内完整箱号比对只差1~2位，备注按校验位给出修改意见）'),
     ('digits',    '箱号缺位/位数检测'),
+    ('ownercode', '箱主代码检测（前3位对BIC注册表，第4位限U/J/Z，其余全过时未注册自动入库）'),
     ('checkdigit', '校验位检测（ISO 6346）'),
     ('typecode',  '箱型检测（写错/缺失报错，含豁免标签时缺箱型放行）'),
     ('cleanup',   '删除空文件夹'),
@@ -875,7 +1028,7 @@ class CheckerApp:
         self.stop_event = threading.Event()
         self.msg_queue = queue.Queue()
         self.running = False
-        self._set_wins = {}   # 已打开的集合管理窗口（箱型代码 / 豁免标签）
+        self._set_wins = {}   # 已打开的集合管理窗口（箱型代码 / 豁免标签 / 箱主代码）
 
         frm_paths = tk.Frame(master, padx=10, pady=8)
         frm_paths.pack(fill='x')
@@ -910,6 +1063,8 @@ class CheckerApp:
         self.btn_codes.pack(side='left', padx=8)
         self.btn_exempt = tk.Button(frm_btn, text='豁免标签管理…', width=14, command=self.manage_exempt)
         self.btn_exempt.pack(side='left', padx=8)
+        self.btn_bic = tk.Button(frm_btn, text='箱主代码管理…', width=14, command=self.manage_bic)
+        self.btn_bic.pack(side='left', padx=8)
         self.btn_start = tk.Button(frm_btn, text='开始检测', width=14, command=self.start)
         self.btn_start.pack(side='left', padx=8)
         self.btn_stop = tk.Button(frm_btn, text='停止', width=10, command=self.stop, state='disabled')
@@ -954,7 +1109,7 @@ class CheckerApp:
             self.ent_out.delete(0, 'end')
             self.ent_out.insert(0, f)
 
-    # ==================== 箱型代码 / 豁免标签管理（增删改查） ====================
+    # ==================== 箱型代码 / 豁免标签 / 箱主代码管理（增删改查） ====================
 
     def manage_codes(self):
         """打开箱型代码管理窗口"""
@@ -973,6 +1128,15 @@ class CheckerApp:
             lambda: EXEMPT_LABELS, valid_exempt_label, set_exempt_labels,
             BASE_EXEMPT_LABELS, '默认豁免标签',
             sort_key=lambda s: int(s[1:]))
+
+    def manage_bic(self):
+        """打开 BIC 箱主代码管理窗口"""
+        self._open_set_manager(
+            'bic', 'BIC箱主代码管理', '箱主代码',
+            '箱主代码前缀须为 3 位字母（如 MSC）。',
+            lambda: BIC_PREFIXES, valid_bic_prefix, set_bic_prefixes,
+            BASE_BIC_PREFIXES, 'BIC注册箱主代码',
+            normalize=str.upper)
 
     def _open_set_manager(self, key, title, noun, fmt_hint, get_items,
                           valid_item, save_items, base_items, base_desc,
