@@ -35,7 +35,8 @@
   4. 报错输出到 Excel（三列：文件地址 / 是否修改完成[留空人工填] / 备注）；
      输出开关（默认开，可关闭）：
      - 带宏 Excel：输出带宏 .xlsm（需同目录或内置 报错模板.xlsm），
-       双击 A 列文件地址用 LabelMe 单独打开该文件；关闭则输出普通 .xlsx
+       双击 A 列文件地址用 LabelMe 打开整个报错列表并定位到该行，
+       可用 上一张/下一张（快捷键 A/D）按表内顺序切换；关闭则输出普通 .xlsx
   5. 检测按优先级执行：jpg&json对应 > 后缀 > 完整箱号一致性 > 缺位 > 箱主代码 >
      校验位 > 箱型，命中报错后停止该文件后续检测，开始下一文件
 
@@ -725,6 +726,36 @@ def template_path():
     return None
 
 
+def launcher_script_path():
+    """LabelMe 列表模式启动脚本（labelme批量打开.py）路径：查找顺序同 template_path"""
+    p = os.path.join(app_dir(), 'labelme批量打开.py')
+    if os.path.exists(p):
+        return p
+    if getattr(sys, 'frozen', False):
+        p = os.path.join(sys._MEIPASS, 'labelme批量打开.py')
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def find_python_for_labelme():
+    """查找能运行启动脚本的 Python 解释器完整路径，找不到返回 ''。
+    未打包时直接用本进程解释器；打包成 exe 后本进程不是 Python，
+    从 labelme 命令位置推导（Scripts\\..\\python.exe），再退到 py 启动器 / PATH"""
+    if not getattr(sys, 'frozen', False):
+        return sys.executable
+    lm = shutil.which('labelme')
+    if lm:
+        cand = os.path.join(os.path.dirname(os.path.dirname(lm)), 'python.exe')
+        if os.path.isfile(cand):
+            return cand
+    for name in ('py', 'python'):
+        p = shutil.which(name)
+        if p:
+            return p
+    return ''
+
+
 def normalize_out(out_xlsx, macro=True):
     """输出路径规范化：macro=True 且有宏模板时强制 .xlsm（宏只能存于 xlsm）；
     macro=False 时强制 .xlsx（普通工作簿存 .xlsm 会报格式不符）"""
@@ -835,8 +866,10 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
 
 def write_excel(path, errors, macro=True):
     """报错写入 Excel：文件地址 / 是否修改完成（留空人工填）/ 备注。
-    macro=True 且有宏模板时输出带宏 .xlsm：双击 A 列文件地址用 LabelMe
-    单独打开该文件；宏参数存隐藏列 Z（Z2 LabelMe 完整路径）。
+    macro=True 且有宏模板时输出带宏 .xlsm：双击 A 列文件地址以列表模式打开
+    LabelMe（整表按顺序切换，见 labelme批量打开.py）；宏参数存隐藏列 Z
+    （Z2 LabelMe 完整路径、Z3 Python 解释器完整路径），
+    并把启动脚本释放到输出文件同目录。
     宏开关关闭或模板缺失时降级为普通 .xlsx（无上述打开功能）"""
     from openpyxl import Workbook, load_workbook
     from openpyxl.styles import Font, Alignment
@@ -862,9 +895,19 @@ def write_excel(path, errors, macro=True):
     ws.column_dimensions['C'].width = 50
     ws.freeze_panes = 'A2'
     if tmpl:
-        # Z 列隐藏参数供双击宏读取（Z2 LabelMe 完整路径）
+        # Z 列隐藏参数供双击宏读取（Z2 LabelMe 完整路径、Z3 Python 解释器路径）
         ws['Z2'] = shutil.which('labelme') or ''
+        ws['Z3'] = find_python_for_labelme()
         ws.column_dimensions['Z'].hidden = True
+        # 释放 LabelMe 列表模式启动脚本到输出文件同目录，供宏调用；
+        # 释放失败不影响 Excel 生成（宏找不到脚本会降级为单独打开文件）
+        launcher = launcher_script_path()
+        if launcher:
+            try:
+                shutil.copyfile(launcher, os.path.join(os.path.dirname(path),
+                                                       'labelme批量打开.py'))
+            except OSError:
+                pass
     wb.save(path)
 
 
@@ -1045,7 +1088,7 @@ class CheckerApp:
         self.chk_macro = tk.BooleanVar(value=True)
         tk.Checkbutton(
             frm_opts, variable=self.chk_macro,
-            text='生成带宏 Excel（.xlsm，Excel 中双击文件地址直接打开 LabelMe）'
+            text='生成带宏 Excel（.xlsm，双击文件地址打开 LabelMe 列表并定位到该行，可上下切换）'
         ).grid(row=0, column=0, sticky='w', pady=2)
 
         frm_checks = tk.LabelFrame(master, text='检测项开关（按优先级顺序执行，命中即停）', padx=10, pady=6)
@@ -1232,7 +1275,8 @@ class CheckerApp:
             lines = [f"检测完成：共扫描文件夹 {summary['dirs']} 个，检查 json {summary['json']} 个，"
                      f"报错 {summary['errors']} 条，删除空文件夹 {summary['deleted']} 个。",
                      f"结果已保存至：{summary['out']}",
-                     'Excel 中：双击「文件地址」直接打开该文件。'
+                     'Excel 中：双击「文件地址」打开 LabelMe 列表并定位到该行，'
+                     '可用快捷键 D/A 上下切换（需启用宏，同目录已生成 labelme批量打开.py）。'
                      '首次打开需点「启用内容」允许宏。']
             for ln in lines:
                 self.log(f'[信息] {ln}')
