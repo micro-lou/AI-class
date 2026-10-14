@@ -5,7 +5,8 @@
 功能：
   1. 遍历指定文件夹（支持多层嵌套，逐层并行枚举，网络盘深目录不拖慢扫描），
      空文件夹自动删除（可开关）
-  2. 检查文件夹内 1.jpg 与 1.json 一一对应（不对应则报错）
+  2. 检查文件夹内 1.jpg 与 1.json 一一对应（不对应则报错）；
+     json 内无任何标签（shapes 为空）时报“json文件为空”
   3. 解析 LabelMe json 的 label：
      - 含 _fz / _oc 后缀的标签：开关开启时报错（不清晰 / 遮挡）；
        开关关闭时整个文件直接跳过，不做其他任何校验也不报错
@@ -46,9 +47,9 @@
      - 带宏 Excel：输出带宏 .xlsm（需同目录或内置 报错模板.xlsm），
        双击 A 列文件地址用 LabelMe 打开整个报错列表并定位到该行，
        可用 上一张/下一张（快捷键 A/D）按表内顺序切换；关闭则输出普通 .xlsx
-  5. 检测逐箱按优先级执行：jpg&json对应 > 后缀 > 完整箱号一致性 > 缺位 >
-     箱主代码 > 校验位 > 箱型，命中报错后停止该箱后续检测（同文件多个
-     箱子报错互不阻断、逐箱累加），全部箱子检完后开始下一文件
+  5. 检测逐箱按优先级执行：jpg&json对应 > json无标签 > 后缀 > 完整箱号
+     一致性 > 缺位 > 箱主代码 > 校验位 > 箱型，命中报错后停止该箱后续检测
+     （同文件多个箱子报错互不阻断、逐箱累加），全部箱子检完后开始下一文件
   6. 检测结果缓存（默认开，可关闭，存同目录 检测结果缓存.json）：重跑时
      未修改的文件（修改时间/大小不变且配置一致）直接复用上次结果，只实际
      检测变化过的文件；任一配置（箱型/豁免/BIC/检测开关）改动后自动全量
@@ -539,18 +540,10 @@ def assemble_group(group, truncate_extra=False):
             d = diff_chars(numbers[i], numbers[j])
             if d <= 2 and numbers[i][10] == numbers[j][10]:
                 pair_errors.append(number_pair_error(numbers[i], numbers[j], d))
-    if len(numbers) <= 1:
-        # 单个箱号时箱型代码也应一致：两个箱型只差一两位 → 标签不一致
-        # （多个箱号时不同箱型属正常，仅在箱型检测中校验是否在代码表中）
-        types = sorted({v for v, _ in candidates['type']})
-        for i in range(len(types)):
-            for j in range(i + 1, len(types)):
-                d = diff_chars(types[i], types[j])
-                if d <= 2:
-                    pair_errors.append(('标签不一致',
-                                        f'{types[i]} / {types[j]}（相差{d}位）'))
+    # 箱型不参与标签不一致比对：不同箱型只可能是写错/缺失，交由优先级7的
+    # 箱型检测（是否在代码表中）单独校验，避免上面&侧面标注了不同箱型误报
 
-    # 箱型取全集（含落单未配对的），供优先级6箱型检测用
+    # 箱型取全集（含落单未配对的），供箱型检测用
     types = sorted({v for v, _ in cat_items.get('type', [])})
     return numbers, types, pair_errors, format_errors
 
@@ -597,6 +590,11 @@ def check_json(path, cfg, stop_event=None):
     shapes = data.get('shapes')
     if not isinstance(shapes, list) or not all(isinstance(s, dict) for s in shapes):
         return [('json解析失败', 'shapes 字段缺失或格式异常')]
+    # 优先级1.5：json 无任何标签（shapes 为空，如画布上未标注就保存）→
+    # 文件级报错，优先级仅次于 jpg/json 一一对应；避免落入末尾“缺少箱型”
+    # 兜底报错造成误导
+    if not shapes:
+        return [('json文件为空', 'shapes 为空，无任何标注标签')]
 
     # 收集标签："," 开头的类别标签记录其框（用于分组）；_fz/_oc 的归入后缀组
     suffix_labels = []   # (报错类型, 原始label)
@@ -791,7 +789,7 @@ CACHE_PATH = os.path.join(app_dir(), '检测结果缓存.json')
 
 # 检测逻辑版本：缓存指纹只含配置内容，检测代码的判定逻辑改动不会体现在
 # 文件的修改时间/大小里，改动判定逻辑时把此号 +1，旧缓存全部失效自动全量重检
-LOGIC_VERSION = 4
+LOGIC_VERSION = 5
 
 
 def valid_cache_entry(v):
