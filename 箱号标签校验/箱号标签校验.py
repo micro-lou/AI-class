@@ -18,6 +18,10 @@
        无类别框时退回全局比对（此时单数字标签多于箱号组数的话，
        多出的按与序列号距离截断，视为危险标识不参与组装）；
        逗号写反的类别标签（如 "1,"）框同样参与分组，但报错提示改正
+     - 危险标检测：类别框外的单字符标签（质心超出所有类别框的容差范围）
+       判为危险标（如样例中的 "0"，形状不限矩形/多边形），检测到时在
+       Excel 中信息性输出（优先级3），不阻断该文件的其他检测；
+       无类别框时无法判定框内外，不做危险标检测
      - 标签一致性用完整 11 位箱号整体比对（不拆分成三段）：组装出的
        多个完整箱号只差一两位且差异不含校验位（校验位相同）→ 报错
        （标签不一致），并分别验算两者校验位判定哪个正确，备注给出
@@ -47,9 +51,10 @@
      - 带宏 Excel：输出带宏 .xlsm（需同目录或内置 报错模板.xlsm），
        双击 A 列文件地址用 LabelMe 打开整个报错列表并定位到该行，
        可用 上一张/下一张（快捷键 A/D）按表内顺序切换；关闭则输出普通 .xlsx
-  5. 检测逐箱按优先级执行：jpg&json对应 > json无标签 > 后缀 > 完整箱号
-     一致性 > 缺位 > 箱主代码 > 校验位 > 箱型，命中报错后停止该箱后续检测
-     （同文件多个箱子报错互不阻断、逐箱累加），全部箱子检完后开始下一文件
+  5. 检测逐箱按优先级执行：jpg&json对应 > json无标签 > 后缀 > 危险标 >
+     完整箱号一致性 > 缺位 > 箱主代码 > 校验位 > 箱型，命中报错后停止该箱
+     后续检测（同文件多个箱子报错互不阻断、逐箱累加），全部箱子检完后
+     开始下一文件；危险标为信息性输出，不阻断该文件其他检测
   6. 检测结果缓存（默认开，可关闭，存同目录 检测结果缓存.json）：重跑时
      未修改的文件（修改时间/大小不变且配置一致）直接复用上次结果，只实际
      检测变化过的文件；任一配置（箱型/豁免/BIC/检测开关）改动后自动全量
@@ -408,7 +413,7 @@ def group_by_category(items, category_boxes, image_width):
     """按类别框（","加数字的标注框）把标签分组：质心落在某框内（允许超出
     CATEGORY_TOL_RATIO 比例的范围）即归该组；框重叠、质心同时在多个框内时
     取框中心更近的组（相邻两组靠得近也不会混淆）；不在任何框范围内的标签
-    丢弃（危险标识 / 相邻箱喷字，不参与校验）。
+    丢弃（其中单字符标签已按危险标另行报出，其余为相邻箱喷字，不参与校验）。
     无类别框时全部标签归单一组（退回全局比对逻辑）。
     返回 [组内标签列表, ...]，每个元素为 [(label, 质心), ...]"""
     if not category_boxes:
@@ -629,7 +634,25 @@ def check_json(path, cfg, stop_event=None):
     if suffix_labels:
         return dedupe_errors(suffix_labels) if cfg['suffix'] else []
 
-    # ---- 按类别框分组：框外标签（危险标识/相邻箱喷字）不参与校验 ----
+    # ---- 优先级3：危险标（信息性输出，不阻断该文件的其他检测）----
+    # 类别框外的单字符标签（质心超出所有类别框的容差范围）判为危险标：
+    # 危险标独立标注在类别框外（如 LEFT_SEA_GATE 中的 "0"），形状不限
+    # 矩形/多边形；相邻箱喷字是多字符标签，不会被误判；校验位是单字符
+    # 但质心在类别框内，也不受影响。无类别框时无法判定框内外，不检测
+    danger_errors = []
+    if cfg['danger'] and category_boxes:
+        width = data.get('imageWidth')
+        width = width if isinstance(width, (int, float)) and width > 0 else 1920
+        tol = round(width * CATEGORY_TOL_RATIO)
+        marks = [lab for lab, cen in items
+                 if len(lab) == 1
+                 and all(dist_outside(cen, b) > tol for b in category_boxes)]
+        if marks:
+            listed = '、'.join(f'"{m}"' for m in marks)
+            danger_errors.append(
+                ('危险标', f'检测到{len(marks)}处危险标（标签：{listed}）'))
+
+    # ---- 按类别框分组：框外标签不参与校验（单字符的已按危险标报出）----
     groups = group_by_category(items, category_boxes, data.get('imageWidth'))
 
     # 逐组配对、组装完整 11 位箱号并做组内一致性比对
@@ -679,25 +702,25 @@ def check_json(path, cfg, stop_event=None):
     for i in range(n):
         boxes.setdefault(find(i), []).append(i)
 
-    # ---- 逐箱检测（优先级3~7，每箱命中即停；多箱报错互不阻断、逐箱累加）----
+    # ---- 逐箱检测（优先级4~8，每箱命中即停；多箱报错互不阻断、逐箱累加）----
     errors = []
     for root in sorted(boxes):
         members = boxes[root]
         numbers = sorted({x for i in members for x in g_data[i][0]})
         types = sorted({t for i in members for t in g_data[i][1]})
-        # 优先级3：标签一致性（组内+跨组比对结论，备注已含修改意见）
+        # 优先级4：标签一致性（组内+跨组比对结论，备注已含修改意见）
         pair_errors = dedupe_errors(
             [e for i in members for e in g_data[i][2]]
             + [e for i in members for e in cross_pairs.get(i, [])])
         if cfg['pair'] and pair_errors:
             errors.extend(pair_errors)
             continue
-        # 优先级4：缺位 / 位数
+        # 优先级5：缺位 / 位数
         fmt_errors = dedupe_errors([e for i in members for e in g_data[i][3]])
         if cfg['digits'] and fmt_errors:
             errors.extend(fmt_errors)
             continue
-        # 优先级5：箱主代码（前3位比对BIC注册表，第4位限U/J/Z）。
+        # 优先级6：箱主代码（前3位比对BIC注册表，第4位限U/J/Z）。
         # 前 3 位未注册的先记下不立即报：其所在箱号校验位验算通过（校验位
         # 覆盖箱主代码+序列号，通过即证明箱主代码真实）时视为新箱主自动
         # 入库且不报错——不要求其余检测全部通过；校验位不通过或检测关闭
@@ -719,7 +742,7 @@ def check_json(path, cfg, stop_event=None):
             if equip_bad:
                 errors.extend(oc_errors)
                 continue
-        # 优先级6：校验位（ISO 6346）
+        # 优先级7：校验位（ISO 6346）
         cd_errors = []
         verified = set()   # 校验位验算通过的箱号（其箱主代码已证实真实）
         if cfg['checkdigit']:
@@ -730,7 +753,7 @@ def check_json(path, cfg, stop_event=None):
                     cd_errors.append(('校验位错误', f'{num} 校验位应为{expect}，实际为{actual}'))
                 else:
                     verified.add(num)
-        # 优先级7：箱型（写错必报；缺箱型默认报错，含豁免数字标签时放行）
+        # 优先级8：箱型（写错必报；缺箱型默认报错，含豁免数字标签时放行）
         tc_errors = []
         if cfg['typecode']:
             for t in types:
@@ -748,7 +771,7 @@ def check_json(path, cfg, stop_event=None):
                     del unknown_owners[o]
         # owners 已排序，按序输出未入库箱主代码的报错，保证多次运行顺序稳定
         oc_errors.extend(unknown_owners[o] for o in sorted(unknown_owners))
-        # 按优先级取最先命中：箱主代码（5）> 校验位（6）> 箱型（7）
+        # 按优先级取最先命中：箱主代码（6）> 校验位（7）> 箱型（8）
         if oc_errors:
             errors.extend(oc_errors)
         elif cd_errors:
@@ -766,7 +789,8 @@ def check_json(path, cfg, stop_event=None):
     if cfg['digits']:
         for lab in reversed_labels:
             errors.append(('箱号位数缺失', f'标签"{lab}"逗号写反，应为",{lab[:-1]}"'))
-    return dedupe_errors(errors)
+    # 危险标为优先级3的信息性输出，排在各箱报错（优先级4~8）之前
+    return dedupe_errors(danger_errors + errors)
 
 
 def safe_check_json(path, cfg, stop_event=None):
@@ -790,7 +814,7 @@ CACHE_PATH = os.path.join(app_dir(), '检测结果缓存.json')
 
 # 检测逻辑版本：缓存指纹只含配置内容，检测代码的判定逻辑改动不会体现在
 # 文件的修改时间/大小里，改动判定逻辑时把此号 +1，旧缓存全部失效自动全量重检
-LOGIC_VERSION = 5
+LOGIC_VERSION = 6
 
 
 def valid_cache_entry(v):
@@ -832,7 +856,8 @@ def cache_fingerprint(cfg):
     实际内容 + 检测逻辑版本。任一变化指纹即变 → 旧缓存全部失效，自动全量重检"""
     payload = json.dumps({
         'cfg': {k: bool(cfg.get(k)) for k in
-                ('suffix', 'pair', 'digits', 'ownercode', 'checkdigit', 'typecode')},
+                ('suffix', 'danger', 'pair', 'digits', 'ownercode', 'checkdigit',
+                 'typecode')},
         'type': sorted(TYPE_CODES),
         'exempt': sorted(EXEMPT_LABELS),
         'bic': sorted(BIC_PREFIXES),
@@ -1226,6 +1251,7 @@ PROGRESS_EVERY = 500
 CHECK_ITEMS = [
     ('pairing',   'jpg/json 文件对应检测'),
     ('suffix',    '_fz/_oc 后缀检测（关闭时含此类标签的文件直接跳过）'),
+    ('danger',    '危险标检测（类别框外单字符标签判为危险标，信息性输出，不阻断其他检测）'),
     ('pair',      '标签一致性检测（箱号差1~2位且校验位相同才报不一致并给修改意见；校验位不同按不同箱子独立检测）'),
     ('digits',    '箱号缺位/位数检测'),
     ('ownercode', '箱主代码检测（前3位对BIC注册表，第4位限U/J/Z，校验位通过时未注册自动入库）'),
