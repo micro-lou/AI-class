@@ -54,7 +54,7 @@
      未修改的文件（修改时间/大小不变且配置一致）直接复用上次结果，只实际
      检测变化过的文件；任一配置（箱型/豁免/BIC/检测开关）改动后自动全量
      重检，检测代码的判定逻辑更新后同样自动全量重检，删除缓存文件亦可
-     强制全量
+     强制全量；保存时只保留本次扫描过的文件，换文件夹后旧条目自动清除
 
 用法：
   图形界面：python 箱号标签校验.py（exe 也可把待检文件夹直接拖到图标上启动；
@@ -783,6 +783,7 @@ def safe_check_json(path, cfg, stop_event=None):
 # 修标工作流是「检测 → 修 → 重跑验证」，重跑时绝大多数文件没动过。
 # 缓存键为 json 路径，条目存 [配置指纹, 修改时间, 大小, 报错列表]：
 # 路径 + 修改时间 + 大小 + 配置指纹全部一致才复用，任一变化即重新检测。
+# 保存时只保留本次扫描过的文件，历史运行的陈旧条目自动清除（见 run_detection）。
 # 删除同目录 检测结果缓存.json 可随时强制全量重检
 
 CACHE_PATH = os.path.join(app_dir(), '检测结果缓存.json')
@@ -1083,6 +1084,12 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
     if cache is not None:
         log(f'[信息] 结果缓存：命中 {cache_stats.count("hit")} 个，'
             f'实际检测 {cache_stats.count("miss")} 个')
+        # 缓存瘦身：丢弃本次未扫描到的条目（换待检文件夹 / 文件已删的陈旧记录），
+        # 缓存文件不再随历史使用无限增长；中途停止时不清（未扫完的文件下次仍可命中）
+        if not stop_event.is_set():
+            scanned = set(paths)
+            for stale in [p for p in cache if p not in scanned]:
+                del cache[stale]
         save_result_cache(cache)
 
     # 未注册箱主代码通过其余全部检测 → 已自动入库，汇总提示（不产生报错行）
