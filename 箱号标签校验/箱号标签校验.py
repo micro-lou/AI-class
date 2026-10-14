@@ -17,10 +17,14 @@
        无类别框时退回全局比对（此时单数字标签多于箱号组数的话，
        多出的按与序列号距离截断，视为危险标识不参与组装）；
        逗号写反的类别标签（如 "1,"）框同样参与分组，但报错提示改正
-     - 标签一致性用完整 11 位箱号整体比对（组内两两比对，不拆分成三段）：
-       组装出的多个完整箱号只差一或两位 → 报错（标签不一致），
-       并分别验算两者校验位判定哪个正确，备注给出修改意见；
-       相差超过两位 → 判定为不同的箱子，各自检测校验位
+     - 标签一致性用完整 11 位箱号整体比对（组内两两比对 + 跨组两两比对，
+       不拆分成三段）：组装出的多个完整箱号只差一或两位 → 报错（标签
+       不一致），并分别验算两者校验位判定哪个正确，备注给出修改意见；
+       相差超过两位 → 判定为不同的箱子，各自检测校验位。
+       同一箱子的标签被画进多个类别框（如上面、侧面各画一个框）时，
+       各组各自组装出的箱号由跨组比对兜住，以校验位正确的为基准给
+       修改意见；跨组两个箱号校验位均正确时视为相邻的两个真实箱子，
+       不报（相邻箱序号只差一两位属正常）
      - 箱号缺位 / 格式不符（应为 4 字母[第4位为设备类型码U/J/Z] + 6 数字 +
        1 校验位，共 11 位）→ 报错
      - 箱主代码前 3 位与 BIC 注册箱主代码比对，不在表中时按相近代码给出
@@ -45,7 +49,8 @@
   6. 检测结果缓存（默认开，可关闭，存同目录 检测结果缓存.json）：重跑时
      未修改的文件（修改时间/大小不变且配置一致）直接复用上次结果，只实际
      检测变化过的文件；任一配置（箱型/豁免/BIC/检测开关）改动后自动全量
-     重检，删除缓存文件亦可强制全量
+     重检，检测代码的判定逻辑更新后同样自动全量重检，删除缓存文件亦可
+     强制全量
 
 用法：
   图形界面：python 箱号标签校验.py（exe 也可把待检文件夹直接拖到图标上启动；
@@ -626,6 +631,7 @@ def check_json(path, cfg, stop_event=None):
     pair_errors = []    # 标签不一致报错（优先级3）
     format_errors = []  # 缺位 / 位数报错（优先级4）
     numbers = []        # 各组组装出的完整箱号（优先级6校验位用）
+    numbers_by_group = []   # 各组的箱号列表（跨组一致性比对用）
     all_types = []      # 各组的箱型代码（优先级7箱型用）
     owners = []         # 各组的箱主代码（完整箱号前4位，优先级5用）
     for group in groups:
@@ -634,6 +640,7 @@ def check_json(path, cfg, stop_event=None):
         if res is None:
             continue
         g_numbers, g_types, g_pairs, g_fmts = res
+        numbers_by_group.append(g_numbers)
         numbers.extend(g_numbers)
         all_types.extend(g_types)
         owners.extend(n[:4] for n in g_numbers)
@@ -646,7 +653,24 @@ def check_json(path, cfg, stop_event=None):
     pair_errors = dedupe_errors(pair_errors)
     format_errors = dedupe_errors(format_errors)
 
-    # ---- 优先级3：标签一致性（组内已比对，命中即停）----
+    # ---- 跨组标签一致性：同一箱子的标签被分别画进两个类别框（如上面、
+    # 侧面各画一个框）时，每组各自组装出完整箱号，组内各只有一个箱号比对
+    # 不了 → 各组箱号两两跨组比对补上，以校验位正确的为基准给修改意见。
+    # 两个箱号都验算通过时视为相邻的两个真实箱子（序号相邻、校验位各自
+    # 正确属正常），不报，避免把相邻箱误报成标签不一致
+    for i in range(len(numbers_by_group)):
+        for j in range(i + 1, len(numbers_by_group)):
+            for a in numbers_by_group[i]:
+                for b in numbers_by_group[j]:
+                    d = diff_chars(a, b)
+                    if not 1 <= d <= 2:
+                        continue
+                    both_ok = (calc_container_check(a[:10]) == int(a[10])
+                               and calc_container_check(b[:10]) == int(b[10]))
+                    if not both_ok:
+                        pair_errors.append(number_pair_error(a, b, d))
+
+    # ---- 优先级3：标签一致性（组内+跨组已比对，命中即停）----
     # 箱号不一致的报错已附带校验位比对结论（见 number_pair_error），
     # 可直接按备注中的修改意见处理，无需再跑优先级5的单独校验位检测
     if cfg['pair'] and pair_errors:
@@ -743,6 +767,10 @@ def safe_check_json(path, cfg, stop_event=None):
 
 CACHE_PATH = os.path.join(app_dir(), '检测结果缓存.json')
 
+# 检测逻辑版本：缓存指纹只含配置内容，检测代码的判定逻辑改动不会体现在
+# 文件的修改时间/大小里，改动判定逻辑时把此号 +1，旧缓存全部失效自动全量重检
+LOGIC_VERSION = 2
+
 
 def valid_cache_entry(v):
     """缓存条目格式校验（防手改/损坏的脏数据混入）：应为
@@ -780,13 +808,14 @@ def save_result_cache(cache):
 
 def cache_fingerprint(cfg):
     """缓存配置指纹：影响检测结果的检测开关 + 三套配置（箱型/豁免/BIC）的
-    实际内容。任一变化指纹即变 → 旧缓存全部失效，自动全量重检"""
+    实际内容 + 检测逻辑版本。任一变化指纹即变 → 旧缓存全部失效，自动全量重检"""
     payload = json.dumps({
         'cfg': {k: bool(cfg.get(k)) for k in
                 ('suffix', 'pair', 'digits', 'ownercode', 'checkdigit', 'typecode')},
         'type': sorted(TYPE_CODES),
         'exempt': sorted(EXEMPT_LABELS),
         'bic': sorted(BIC_PREFIXES),
+        'logic': LOGIC_VERSION,
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.md5(payload.encode('utf-8')).hexdigest()
 
@@ -1170,7 +1199,7 @@ PROGRESS_EVERY = 500
 CHECK_ITEMS = [
     ('pairing',   'jpg/json 文件对应检测'),
     ('suffix',    '_fz/_oc 后缀检测（关闭时含此类标签的文件直接跳过）'),
-    ('pair',      '标签一致性检测（组内完整箱号比对只差1~2位，备注按校验位给出修改意见）'),
+    ('pair',      '标签一致性检测（组内+跨组完整箱号比对只差1~2位，备注按校验位给出修改意见）'),
     ('digits',    '箱号缺位/位数检测'),
     ('ownercode', '箱主代码检测（前3位对BIC注册表，第4位限U/J/Z，校验位通过时未注册自动入库）'),
     ('checkdigit', '校验位检测（ISO 6346）'),
