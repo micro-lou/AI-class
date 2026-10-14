@@ -25,8 +25,10 @@
        1 校验位，共 11 位）→ 报错
      - 箱主代码前 3 位与 BIC 注册箱主代码比对，不在表中时按相近代码给出
        修改建议；第 4 位设备类型码仅允许 U（货运集装箱）/ J（可拆卸集装箱
-       配件）/ Z（底盘车/拖车）；未注册箱主代码若通过其余全部检测则视为
-       新箱主自动入库不报错；BIC 代码可在界面增删改查，
+       配件）/ Z（底盘车/拖车）；未注册箱主代码所在箱号校验位验算通过
+       （校验位覆盖箱主代码，通过即证明代码真实）时视为新箱主自动入库
+       不报错，同文件其余报错（箱型缺失/写错、其他箱子的校验位错误等）
+       不阻断入库，入库后照常返回其余报错；BIC 代码可在界面增删改查，
        改动保存到同目录 BIC箱主代码配置.json
      - 按 ISO 6346 验算校验位 → 校验位错误
      - 箱型代码已内置（源自 箱型代码全.xls），写错必报错；缺箱型报错，
@@ -658,12 +660,15 @@ def check_json(path, cfg, stop_event=None):
         return format_errors
 
     # ---- 优先级5：箱主代码检测（前3位比对BIC注册表，第4位限U/J/Z）----
-    # 前 3 位未注册的箱主代码先记下不立即报：其余检测（校验位/箱型）全部
-    # 通过时视为新箱主，自动加入注册表且不报错；否则按优先级照常报错。
+    # 前 3 位未注册的箱主代码先记下不立即报：其所在箱号校验位验算通过
+    # （校验位覆盖箱主代码+序列号，通过即证明箱主代码真实）时视为新箱主，
+    # 自动加入注册表且不报错——不要求该文件其余检测全部通过，箱型缺失/写错、
+    # 同文件其他箱子的校验位错误等都不阻断入库；校验位不通过或校验位检测
+    # 关闭时按优先级照常报错。
     # 第 4 位设备类型码错误属格式错误，必报且不参与自动入库豁免。
     oc_errors = []             # 箱主代码报错
     equip_bad = False          # 是否存在设备类型码错误（必报）
-    unknown_prefixes = set()   # 未注册的箱主代码前3位（候选自动入库）
+    unknown_owners = {}        # 未注册箱主代码 -> 报错（候选自动入库）
     if cfg['ownercode']:
         for owner in owners:
             eq_err = equipment_code_error(owner)
@@ -673,19 +678,21 @@ def check_json(path, cfg, stop_event=None):
                 continue
             p_err = bic_prefix_error(owner)
             if p_err:
-                oc_errors.append(p_err)
-                unknown_prefixes.add(owner[:3])
+                unknown_owners[owner] = p_err
         if equip_bad:
             return oc_errors
 
     # ---- 优先级6：校验位检测 ----
     cd_errors = []
+    verified = set()           # 校验位验算通过的完整箱号（其箱主代码已证实真实）
     if cfg['checkdigit']:
         for num in numbers:
             expect = calc_container_check(num[:10])
             actual = int(num[10])
             if expect != actual:
                 cd_errors.append(('校验位错误', f'{num} 校验位应为{expect}，实际为{actual}'))
+            else:
+                verified.add(num)
 
     # ---- 优先级7：箱型检测（写错必报；缺箱型默认报错，含豁免数字标签时放行）----
     tc_errors = []
@@ -696,22 +703,25 @@ def check_json(path, cfg, stop_event=None):
         if not all_types and not type_exempt:
             tc_errors.append(('缺少箱型', '未找到箱型代码标签（含豁免标签时放行，可在「豁免标签管理」中配置）'))
 
+    # 校验位验算通过的箱号 → 其未注册箱主代码自动入库，对应报错一并撤销，
+    # 文件其余报错（若有）照常按优先级返回；校验位检测关闭时无法确认箱号
+    # 真实性，不自动入库（避免污染注册表），未入库的照常报错提示人工核对
+    if unknown_owners and verified:
+        ok = {o for o in unknown_owners if any(n[:4] == o for n in verified)}
+        if ok:
+            auto_add_bic_prefixes({o[:3] for o in ok})
+            for o in ok:
+                del unknown_owners[o]
+    # owners 已排序，按序输出未入库箱主代码的报错，保证多次运行顺序稳定
+    oc_errors.extend(unknown_owners[o] for o in sorted(unknown_owners))
+
     # 按优先级返回最先命中的报错：箱主代码（5）> 校验位（6）> 箱型（7）
-    if oc_errors and (cd_errors or tc_errors):
+    if oc_errors:
         return oc_errors
     if cd_errors:
         return cd_errors
     if tc_errors:
         return tc_errors
-
-    # 其余检测全部通过：未注册箱主代码视为新箱主，自动加入注册表且不报错。
-    # 校验位检测被关闭时无法确认箱号真实性，不自动入库（避免污染注册表），
-    # 改为照常报错提示人工核对
-    if unknown_prefixes:
-        if cfg['checkdigit']:
-            auto_add_bic_prefixes(unknown_prefixes)
-        else:
-            return oc_errors
     return []
 
 
@@ -1157,7 +1167,7 @@ CHECK_ITEMS = [
     ('suffix',    '_fz/_oc 后缀检测（关闭时含此类标签的文件直接跳过）'),
     ('pair',      '标签一致性检测（组内完整箱号比对只差1~2位，备注按校验位给出修改意见）'),
     ('digits',    '箱号缺位/位数检测'),
-    ('ownercode', '箱主代码检测（前3位对BIC注册表，第4位限U/J/Z，其余全过时未注册自动入库）'),
+    ('ownercode', '箱主代码检测（前3位对BIC注册表，第4位限U/J/Z，校验位通过时未注册自动入库）'),
     ('checkdigit', '校验位检测（ISO 6346）'),
     ('typecode',  '箱型检测（写错/缺失报错，含豁免标签时缺箱型放行）'),
     ('cleanup',   '删除空文件夹'),
