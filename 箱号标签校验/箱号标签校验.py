@@ -17,14 +17,16 @@
        无类别框时退回全局比对（此时单数字标签多于箱号组数的话，
        多出的按与序列号距离截断，视为危险标识不参与组装）；
        逗号写反的类别标签（如 "1,"）框同样参与分组，但报错提示改正
-     - 标签一致性用完整 11 位箱号整体比对（组内两两比对 + 跨组两两比对，
-       不拆分成三段）：组装出的多个完整箱号只差一或两位 → 报错（标签
-       不一致），并分别验算两者校验位判定哪个正确，备注给出修改意见；
-       相差超过两位 → 判定为不同的箱子，各自检测校验位。
+     - 标签一致性用完整 11 位箱号整体比对（不拆分成三段）：组装出的
+       多个完整箱号只差一两位且差异不含校验位（校验位相同）→ 报错
+       （标签不一致），并分别验算两者校验位判定哪个正确，备注给出
+       修改意见；校验位不同或相差超过两位 → 判定为不同的箱子，各自
+       检测校验位（错的报“校验位应为X”）
        同一箱子的标签被画进多个类别框（如上面、侧面各画一个框）时，
-       各组各自组装出的箱号由跨组比对兜住，以校验位正确的为基准给
-       修改意见；跨组两个箱号校验位均正确时视为相邻的两个真实箱子，
-       不报（相邻箱序号只差一两位属正常）
+       各组箱号相同或差异不含校验位（校验位相同）即并为一箱后照常检
+       测；两框箱号校验位不同则按两个箱子独立检测——即便真是同一箱
+       也只报校验位错误（备注含应为的校验位），不给跨框修改意见，
+       避免把同图中相邻两箱误判成标签不一致
      - 箱号缺位 / 格式不符（应为 4 字母[第4位为设备类型码U/J/Z] + 6 数字 +
        1 校验位，共 11 位）→ 报错
      - 箱主代码前 3 位与 BIC 注册箱主代码比对，不在表中时按相近代码给出
@@ -44,8 +46,9 @@
      - 带宏 Excel：输出带宏 .xlsm（需同目录或内置 报错模板.xlsm），
        双击 A 列文件地址用 LabelMe 打开整个报错列表并定位到该行，
        可用 上一张/下一张（快捷键 A/D）按表内顺序切换；关闭则输出普通 .xlsx
-  5. 检测按优先级执行：jpg&json对应 > 后缀 > 完整箱号一致性 > 缺位 > 箱主代码 >
-     校验位 > 箱型，命中报错后停止该文件后续检测，开始下一文件
+  5. 检测逐箱按优先级执行：jpg&json对应 > 后缀 > 完整箱号一致性 > 缺位 >
+     箱主代码 > 校验位 > 箱型，命中报错后停止该箱后续检测（同文件多个
+     箱子报错互不阻断、逐箱累加），全部箱子检完后开始下一文件
   6. 检测结果缓存（默认开，可关闭，存同目录 检测结果缓存.json）：重跑时
      未修改的文件（修改时间/大小不变且配置一致）直接复用上次结果，只实际
      检测变化过的文件；任一配置（箱型/豁免/BIC/检测开关）改动后自动全量
@@ -275,6 +278,9 @@ def number_pair_error(a, b, d):
     - 一对一错：错的那个应以对的为准修改
     - 只在校验位上不同：其一必错（前10位相同校验位唯一），结论确定
     - 都对（差异位在前10位）或都错：无法自动判定，提示人工核对"""
+    # 统一成对箱号的顺序：同一对箱号无论来自组内还是跨组比对，报错文本
+    # 完全一致，去重才能合并（否则 A/B、B/A 两条文本在 Excel 里重复成行）
+    a, b = sorted((a, b))
     ok_a = calc_container_check(a[:10]) == int(a[10])
     ok_b = calc_container_check(b[:10]) == int(b[10])
     base = f'{a} / {b}（相差{d}位）'
@@ -523,14 +529,15 @@ def assemble_group(group, truncate_extra=False):
             numbers = sorted(set(numbers))
 
     # ---- 组内标签一致性检测（完整 11 位箱号整体比对，不拆分成三段）----
-    # 组装出的多个完整箱号两两比对：只差一或两位 → 同一箱子的标签标注不一致，
-    # 分别验算两个箱号的校验位判定哪个更可能正确，备注给出修改意见；
-    # 相差超过两位 → 判定为不同的箱子，各自参与后续校验位检测
+    # 组装出的多个完整箱号两两比对：只差一两位且差异不含校验位（校验位
+    # 相同）→ 同一箱子的标签标注不一致，分别验算两个箱号的校验位判定
+    # 哪个更可能正确，备注给出修改意见；校验位不同或相差超过两位 → 判定
+    # 为不同的箱子，各自参与后续校验位检测（错的报“校验位应为X”）
     pair_errors = []
     for i in range(len(numbers)):
         for j in range(i + 1, len(numbers)):
             d = diff_chars(numbers[i], numbers[j])
-            if d <= 2:
+            if d <= 2 and numbers[i][10] == numbers[j][10]:
                 pair_errors.append(number_pair_error(numbers[i], numbers[j], d))
     if len(numbers) <= 1:
         # 单个箱号时箱型代码也应一致：两个箱型只差一两位 → 标签不一致
@@ -627,126 +634,141 @@ def check_json(path, cfg, stop_event=None):
     # ---- 按类别框分组：框外标签（危险标识/相邻箱喷字）不参与校验 ----
     groups = group_by_category(items, category_boxes, data.get('imageWidth'))
 
-    # 逐组配对、组装完整 11 位箱号并做组内一致性比对，结果汇总
-    pair_errors = []    # 标签不一致报错（优先级3）
-    format_errors = []  # 缺位 / 位数报错（优先级4）
-    numbers = []        # 各组组装出的完整箱号（优先级6校验位用）
-    numbers_by_group = []   # 各组的箱号列表（跨组一致性比对用）
-    all_types = []      # 各组的箱型代码（优先级7箱型用）
-    owners = []         # 各组的箱主代码（完整箱号前4位，优先级5用）
+    # 逐组配对、组装完整 11 位箱号并做组内一致性比对
+    g_data = []   # 每组的 (箱号列表, 箱型列表, 组内不一致报错, 缺位报错)
     for group in groups:
         # 无类别框时唯一一组为全局组，启用单数字危险标识截断兜底
         res = assemble_group(group, truncate_extra=not category_boxes)
-        if res is None:
-            continue
-        g_numbers, g_types, g_pairs, g_fmts = res
-        numbers_by_group.append(g_numbers)
-        numbers.extend(g_numbers)
-        all_types.extend(g_types)
-        owners.extend(n[:4] for n in g_numbers)
-        pair_errors.extend(g_pairs)
-        format_errors.extend(g_fmts)
-    numbers = sorted(set(numbers))
-    all_types = sorted(set(all_types))
-    owners = sorted(set(owners))
-    # 各组累积的报错去重（同一异常标签可能出现在多个组 / 多个形状上）
-    pair_errors = dedupe_errors(pair_errors)
-    format_errors = dedupe_errors(format_errors)
+        if res is not None:
+            g_data.append(res)
 
-    # ---- 跨组标签一致性：同一箱子的标签被分别画进两个类别框（如上面、
-    # 侧面各画一个框）时，每组各自组装出完整箱号，组内各只有一个箱号比对
-    # 不了 → 各组箱号两两跨组比对补上，以校验位正确的为基准给修改意见。
-    # 两个箱号都验算通过时视为相邻的两个真实箱子（序号相邻、校验位各自
-    # 正确属正常），不报，避免把相邻箱误报成标签不一致
-    for i in range(len(numbers_by_group)):
-        for j in range(i + 1, len(numbers_by_group)):
-            for a in numbers_by_group[i]:
-                for b in numbers_by_group[j]:
+    # ---- 并箱：同一箱子的标签被分别画进两个类别框（如上面、侧面各画一个
+    # 框）时，每组各自组装出箱号，组内比对发现不了不一致。各组箱号两两
+    # 跨组比对，判定为同一箱子才并为一箱（箱号/箱型取并集）后照常检测：
+    #   - 箱号完全相同 → 同一箱子（相邻两箱不可能同号）
+    #   - 只差一两位且校验位相同（且非两者都验算通过）→ 同一箱子标签
+    #     不一致（箱主代码/序列号抄错、校验位照抄），按校验位给修改意见
+    # 校验位不同 → 按两个不同的箱子独立检测，不给跨框修改意见——即便
+    # 两框真是同一箱子，错的箱号也会在自身的校验位检测中报“应为X”，
+    # 信息不丢；这样同图中相邻两箱（序号只差一两位、校验位各不同）不
+    # 会被误判成标签不一致
+    n = len(g_data)
+    parent = list(range(n))          # 并查集：组下标 -> 箱（根）下标
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    cross_pairs = {}                 # 组下标 -> 跨组标签不一致报错（并箱后同箱）
+    for i in range(n):
+        for j in range(i + 1, n):
+            same_box = False
+            for a in g_data[i][0]:
+                for b in g_data[j][0]:
                     d = diff_chars(a, b)
-                    if not 1 <= d <= 2:
-                        continue
-                    both_ok = (calc_container_check(a[:10]) == int(a[10])
-                               and calc_container_check(b[:10]) == int(b[10]))
-                    if not both_ok:
-                        pair_errors.append(number_pair_error(a, b, d))
+                    if d == 0:
+                        same_box = True
+                    elif (d <= 2 and a[10] == b[10]
+                          and not (calc_container_check(a[:10]) == int(a[10])
+                                   and calc_container_check(b[:10]) == int(b[10]))):
+                        same_box = True
+                        cross_pairs.setdefault(i, []).append(number_pair_error(a, b, d))
+            if same_box:
+                parent[find(i)] = find(j)
+    boxes = {}                       # 箱根下标 -> 成员组下标列表
+    for i in range(n):
+        boxes.setdefault(find(i), []).append(i)
 
-    # ---- 优先级3：标签一致性（组内+跨组已比对，命中即停）----
-    # 箱号不一致的报错已附带校验位比对结论（见 number_pair_error），
-    # 可直接按备注中的修改意见处理，无需再跑优先级5的单独校验位检测
-    if cfg['pair'] and pair_errors:
-        return pair_errors
-
-    # ---- 优先级4：缺位 / 位数检测 ----
-    # 逗号写反的类别标签（如 "1,"）一并在此报错，提示改为 ",1"
-    for lab in reversed_labels:
-        format_errors.append(('箱号位数缺失', f'标签"{lab}"逗号写反，应为",{lab[:-1]}"'))
-    if cfg['digits'] and format_errors:
-        return format_errors
-
-    # ---- 优先级5：箱主代码检测（前3位比对BIC注册表，第4位限U/J/Z）----
-    # 前 3 位未注册的箱主代码先记下不立即报：其所在箱号校验位验算通过
-    # （校验位覆盖箱主代码+序列号，通过即证明箱主代码真实）时视为新箱主，
-    # 自动加入注册表且不报错——不要求该文件其余检测全部通过，箱型缺失/写错、
-    # 同文件其他箱子的校验位错误等都不阻断入库；校验位不通过或校验位检测
-    # 关闭时按优先级照常报错。
-    # 第 4 位设备类型码错误属格式错误，必报且不参与自动入库豁免。
-    oc_errors = []             # 箱主代码报错
-    equip_bad = False          # 是否存在设备类型码错误（必报）
-    unknown_owners = {}        # 未注册箱主代码 -> 报错（候选自动入库）
-    if cfg['ownercode']:
-        for owner in owners:
-            eq_err = equipment_code_error(owner)
-            if eq_err:
-                equip_bad = True
-                oc_errors.append(eq_err)
+    # ---- 逐箱检测（优先级3~7，每箱命中即停；多箱报错互不阻断、逐箱累加）----
+    errors = []
+    for root in sorted(boxes):
+        members = boxes[root]
+        numbers = sorted({x for i in members for x in g_data[i][0]})
+        types = sorted({t for i in members for t in g_data[i][1]})
+        # 优先级3：标签一致性（组内+跨组比对结论，备注已含修改意见）
+        pair_errors = dedupe_errors(
+            [e for i in members for e in g_data[i][2]]
+            + [e for i in members for e in cross_pairs.get(i, [])])
+        if cfg['pair'] and pair_errors:
+            errors.extend(pair_errors)
+            continue
+        # 优先级4：缺位 / 位数
+        fmt_errors = dedupe_errors([e for i in members for e in g_data[i][3]])
+        if cfg['digits'] and fmt_errors:
+            errors.extend(fmt_errors)
+            continue
+        # 优先级5：箱主代码（前3位比对BIC注册表，第4位限U/J/Z）。
+        # 前 3 位未注册的先记下不立即报：其所在箱号校验位验算通过（校验位
+        # 覆盖箱主代码+序列号，通过即证明箱主代码真实）时视为新箱主自动
+        # 入库且不报错——不要求其余检测全部通过；校验位不通过或检测关闭
+        # 时按优先级照常报错。第 4 位设备类型码错误属格式错误，必报
+        oc_errors = []
+        equip_bad = False
+        unknown_owners = {}
+        owners = sorted({x[:4] for x in numbers})
+        if cfg['ownercode']:
+            for owner in owners:
+                eq_err = equipment_code_error(owner)
+                if eq_err:
+                    equip_bad = True
+                    oc_errors.append(eq_err)
+                    continue
+                p_err = bic_prefix_error(owner)
+                if p_err:
+                    unknown_owners[owner] = p_err
+            if equip_bad:
+                errors.extend(oc_errors)
                 continue
-            p_err = bic_prefix_error(owner)
-            if p_err:
-                unknown_owners[owner] = p_err
-        if equip_bad:
-            return oc_errors
+        # 优先级6：校验位（ISO 6346）
+        cd_errors = []
+        verified = set()   # 校验位验算通过的箱号（其箱主代码已证实真实）
+        if cfg['checkdigit']:
+            for num in numbers:
+                expect = calc_container_check(num[:10])
+                actual = int(num[10])
+                if expect != actual:
+                    cd_errors.append(('校验位错误', f'{num} 校验位应为{expect}，实际为{actual}'))
+                else:
+                    verified.add(num)
+        # 优先级7：箱型（写错必报；缺箱型默认报错，含豁免数字标签时放行）
+        tc_errors = []
+        if cfg['typecode']:
+            for t in types:
+                if t not in TYPE_CODES:
+                    tc_errors.append(('箱型不存在', f'{t} 不在国标箱型代码表中'))
+            if not types and not type_exempt:
+                tc_errors.append(('缺少箱型', '未找到箱型代码标签（含豁免标签时放行，可在「豁免标签管理」中配置）'))
+        # 校验位通过的箱号 → 其未注册箱主代码自动入库并撤销对应报错；校验位
+        # 检测关闭时无法确认箱号真实性，不自动入库（避免污染注册表）
+        if unknown_owners and verified:
+            ok = {o for o in unknown_owners if any(x[:4] == o for x in verified)}
+            if ok:
+                auto_add_bic_prefixes({o[:3] for o in ok})
+                for o in ok:
+                    del unknown_owners[o]
+        # owners 已排序，按序输出未入库箱主代码的报错，保证多次运行顺序稳定
+        oc_errors.extend(unknown_owners[o] for o in sorted(unknown_owners))
+        # 按优先级取最先命中：箱主代码（5）> 校验位（6）> 箱型（7）
+        if oc_errors:
+            errors.extend(oc_errors)
+        elif cd_errors:
+            errors.extend(cd_errors)
+        elif tc_errors:
+            errors.extend(tc_errors)
 
-    # ---- 优先级6：校验位检测 ----
-    cd_errors = []
-    verified = set()           # 校验位验算通过的完整箱号（其箱主代码已证实真实）
-    if cfg['checkdigit']:
-        for num in numbers:
-            expect = calc_container_check(num[:10])
-            actual = int(num[10])
-            if expect != actual:
-                cd_errors.append(('校验位错误', f'{num} 校验位应为{expect}，实际为{actual}'))
-            else:
-                verified.add(num)
+    # 整个文件没有任何箱号组（只有类别框/豁免标签，无箱号主体）时，
+    # 仍按缺箱型报错提醒该文件无内容可检（沿用原文件级行为）
+    if cfg['typecode'] and not g_data and not type_exempt:
+        errors.append(('缺少箱型', '未找到箱型代码标签（含豁免标签时放行，可在「豁免标签管理」中配置）'))
 
-    # ---- 优先级7：箱型检测（写错必报；缺箱型默认报错，含豁免数字标签时放行）----
-    tc_errors = []
-    if cfg['typecode']:
-        for t in all_types:
-            if t not in TYPE_CODES:
-                tc_errors.append(('箱型不存在', f'{t} 不在国标箱型代码表中'))
-        if not all_types and not type_exempt:
-            tc_errors.append(('缺少箱型', '未找到箱型代码标签（含豁免标签时放行，可在「豁免标签管理」中配置）'))
-
-    # 校验位验算通过的箱号 → 其未注册箱主代码自动入库，对应报错一并撤销，
-    # 文件其余报错（若有）照常按优先级返回；校验位检测关闭时无法确认箱号
-    # 真实性，不自动入库（避免污染注册表），未入库的照常报错提示人工核对
-    if unknown_owners and verified:
-        ok = {o for o in unknown_owners if any(n[:4] == o for n in verified)}
-        if ok:
-            auto_add_bic_prefixes({o[:3] for o in ok})
-            for o in ok:
-                del unknown_owners[o]
-    # owners 已排序，按序输出未入库箱主代码的报错，保证多次运行顺序稳定
-    oc_errors.extend(unknown_owners[o] for o in sorted(unknown_owners))
-
-    # 按优先级返回最先命中的报错：箱主代码（5）> 校验位（6）> 箱型（7）
-    if oc_errors:
-        return oc_errors
-    if cd_errors:
-        return cd_errors
-    if tc_errors:
-        return tc_errors
-    return []
+    # 逗号写反的类别标签（如 "1,"）：文件级报错，提示改为 ",1"
+    #（不影响分组，与各箱报错一并输出）
+    if cfg['digits']:
+        for lab in reversed_labels:
+            errors.append(('箱号位数缺失', f'标签"{lab}"逗号写反，应为",{lab[:-1]}"'))
+    return dedupe_errors(errors)
 
 
 def safe_check_json(path, cfg, stop_event=None):
@@ -769,7 +791,7 @@ CACHE_PATH = os.path.join(app_dir(), '检测结果缓存.json')
 
 # 检测逻辑版本：缓存指纹只含配置内容，检测代码的判定逻辑改动不会体现在
 # 文件的修改时间/大小里，改动判定逻辑时把此号 +1，旧缓存全部失效自动全量重检
-LOGIC_VERSION = 2
+LOGIC_VERSION = 4
 
 
 def valid_cache_entry(v):
@@ -1199,7 +1221,7 @@ PROGRESS_EVERY = 500
 CHECK_ITEMS = [
     ('pairing',   'jpg/json 文件对应检测'),
     ('suffix',    '_fz/_oc 后缀检测（关闭时含此类标签的文件直接跳过）'),
-    ('pair',      '标签一致性检测（组内+跨组完整箱号比对只差1~2位，备注按校验位给出修改意见）'),
+    ('pair',      '标签一致性检测（箱号差1~2位且校验位相同才报不一致并给修改意见；校验位不同按不同箱子独立检测）'),
     ('digits',    '箱号缺位/位数检测'),
     ('ownercode', '箱主代码检测（前3位对BIC注册表，第4位限U/J/Z，校验位通过时未注册自动入库）'),
     ('checkdigit', '校验位检测（ISO 6346）'),
@@ -1382,7 +1404,7 @@ class CheckerApp:
             text='结果缓存（重跑时未修改的文件直接复用上次结果，配置改动后自动全量重检）'
         ).grid(row=1, column=0, sticky='w', pady=2)
 
-        frm_checks = tk.LabelFrame(master, text='检测项开关（按优先级顺序执行，命中即停）', padx=10, pady=6)
+        frm_checks = tk.LabelFrame(master, text='检测项开关（每箱按优先级顺序执行，命中即停；多箱报错互不阻断、逐箱累加）', padx=10, pady=6)
         frm_checks.pack(fill='x', padx=10, pady=4)
         self.cfg_vars = {}
         for i, (key, text) in enumerate(CHECK_ITEMS):
