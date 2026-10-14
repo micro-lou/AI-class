@@ -35,8 +35,8 @@
        但标签含豁免数字标签（默认 ,1 ,6 ,10 等，可管理）时允许缺箱型；
        箱型代码 / 豁免标签均可在界面增删改查，
        改动分别保存到同目录 箱型代码配置.json / 豁免标签配置.json
-  4. 报错输出到 Excel（三列：文件地址 / 是否修改完成[留空人工填] / 备注）；
-     输出开关（默认开，可关闭）：
+  4. 报错输出到 Excel（三列：文件地址 / 是否修改完成[留空人工填] / 备注），
+     无报错时不生成 Excel 文件；输出开关（默认开，可关闭）：
      - 带宏 Excel：输出带宏 .xlsm（需同目录或内置 报错模板.xlsm），
        双击 A 列文件地址用 LabelMe 打开整个报错列表并定位到该行，
        可用 上一张/下一张（快捷键 A/D）按表内顺序切换；关闭则输出普通 .xlsx
@@ -1054,8 +1054,13 @@ def run_detection(root, cfg, out_xlsx, log, stop_event):
             except OSError as e:
                 log(f'[清理] 删除失败 {dirpath}：{e}')
 
-    out_xlsx = write_excel(out_xlsx, all_errors, macro=cfg.get('macro', True),
-                           log=log)
+    # 无报错时不生成 Excel：目录里不留只有表头的空表，也省去打开确认的步骤
+    if not all_errors:
+        log('[信息] 未发现任何报错，本次不生成 Excel')
+        out_xlsx = None
+    else:
+        out_xlsx = write_excel(out_xlsx, all_errors, macro=cfg.get('macro', True),
+                               log=log)
 
     return {
         'dirs': n_dirs,
@@ -1542,16 +1547,19 @@ class CheckerApp:
             messagebox.showerror('错误', f'检测中断：{err}')
         else:
             lines = [f"检测完成：共扫描文件夹 {summary['dirs']} 个，检查 json {summary['json']} 个，"
-                     f"报错 {summary['errors']} 条，删除空文件夹 {summary['deleted']} 个。",
-                     f"结果已保存至：{summary['out']}"]
-            # 按实际输出格式提示：.xlsm 才带双击打开 LabelMe 的宏功能
-            if summary['out'].lower().endswith('.xlsm'):
-                lines.append('Excel 中：双击「文件地址」打开 LabelMe 列表并定位到该行，'
-                             '可用快捷键 D/A 上下切换（需启用宏，同目录已生成 labelme批量打开.py）。'
-                             '首次打开需点「启用内容」允许宏。')
+                     f"报错 {summary['errors']} 条，删除空文件夹 {summary['deleted']} 个。"]
+            if summary['out']:
+                lines.append(f"结果已保存至：{summary['out']}")
+                # 按实际输出格式提示：.xlsm 才带双击打开 LabelMe 的宏功能
+                if summary['out'].lower().endswith('.xlsm'):
+                    lines.append('Excel 中：双击「文件地址」打开 LabelMe 列表并定位到该行，'
+                                 '可用快捷键 D/A 上下切换（需启用宏，同目录已生成 labelme批量打开.py）。'
+                                 '首次打开需点「启用内容」允许宏。')
+                else:
+                    lines.append('本次输出为普通 .xlsx（宏开关关闭或缺少宏模板），'
+                                 '不具备双击文件地址打开 LabelMe 的功能。')
             else:
-                lines.append('本次输出为普通 .xlsx（宏开关关闭或缺少宏模板），'
-                             '不具备双击文件地址打开 LabelMe 的功能。')
+                lines.append('未发现任何报错，本次未生成 Excel。')
             for ln in lines:
                 self.log(f'[信息] {ln}')
             messagebox.showinfo('完成', '\n'.join(lines))
@@ -1579,7 +1587,10 @@ def run_cli(args):
         sys.exit(1)
     print(f"检测完成：文件夹 {summary['dirs']} 个，json {summary['json']} 个，"
           f"报错 {summary['errors']} 条，删除空文件夹 {summary['deleted']} 个")
-    print(f"结果已保存至：{summary['out']}")
+    if summary['out']:
+        print(f"结果已保存至：{summary['out']}")
+    else:
+        print('未发现任何报错，本次未生成 Excel')
 
 
 def main():
