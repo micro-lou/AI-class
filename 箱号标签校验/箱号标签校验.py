@@ -14,12 +14,15 @@
      - 标签按类别框（","加数字的标注框）分组：质心落在框内（允许超出
        图宽 4%，约 77px）的标签归为同一组，相邻两组靠得近也不会混淆；
        框外的标签视为危险标识/相邻箱喷字，不参与校验；框内只有孤立数字
-       （无箱主代码/序列号）的组视为危险标识组，整组忽略。
+       （无箱主代码/序列号）的组视为危险标识组，整组忽略；但组内含字母
+       数字混合的残缺箱号整体标签（如少打一位的 MSCU123456）时不算孤立
+       标注，报"箱号位数缺失"交人工核对。
        无类别框时退回全局比对（此时单数字标签多于箱号组数的话，
        多出的按与序列号距离截断，视为危险标识不参与组装）；
        逗号写反的类别标签（如 "1,"）框同样参与分组，但报错提示改正
-     - 危险标检测：类别框外的单字符标签（质心超出所有类别框的容差范围）
-       判为危险标（如样例中的 "0"，形状不限矩形/多边形），检测到时在
+     - 危险标检测：类别框外的数字 "0" 标签（质心超出所有类别框的容差
+       范围）判为危险标（按现场约定只认 0，其他单字符不算，形状不限
+       矩形/多边形），检测到时在
        Excel 中信息性输出（优先级3），不阻断该文件的其他检测；
        无类别框时无法判定框内外，不做危险标检测
      - 标签一致性用完整 11 位箱号整体比对（不拆分成三段）：组装出的
@@ -413,7 +416,7 @@ def group_by_category(items, category_boxes, image_width):
     """按类别框（","加数字的标注框）把标签分组：质心落在某框内（允许超出
     CATEGORY_TOL_RATIO 比例的范围）即归该组；框重叠、质心同时在多个框内时
     取框中心更近的组（相邻两组靠得近也不会混淆）；不在任何框范围内的标签
-    丢弃（其中单字符标签已按危险标另行报出，其余为相邻箱喷字，不参与校验）。
+    丢弃（其中数字 "0" 已按危险标另行报出，其余为相邻箱喷字，不参与校验）。
     无类别框时全部标签归单一组（退回全局比对逻辑）。
     返回 [组内标签列表, ...]，每个元素为 [(label, 质心), ...]"""
     if not category_boxes:
@@ -442,23 +445,33 @@ def group_by_category(items, category_boxes, image_width):
 def assemble_group(group, truncate_extra=False):
     """单组标签（同一箱子的上面&侧面标注）配对并组装完整 11 位箱号，
     组内做一致性比对。返回 (箱号列表, 箱型列表, 不一致报错, 缺位报错)；
-    组内没有箱主代码/序列号/完整箱号时返回 None——视为危险标识等孤立
-    标注组（如类别框只框住一个孤立数字），整组忽略不校验。
+    组内没有箱主代码/序列号/完整箱号、且不含残缺箱号标签时返回 None——
+    视为危险标识等孤立标注组（如类别框只框住一个孤立数字），整组忽略
+    不校验；含残缺箱号（字母数字混合又拼不成完整箱号的整体标签，如少
+    打一位的 MSCU123456）时不能漏检，返回格式错误交由缺位检测报出。
     truncate_extra=True（无类别框的全局组）时，单数字标签多于箱号组数
     的话多出的按危险标识截断；有类别框时框外标签已被分组剔除，无需截断"""
     cat_items = {}      # 类别 -> [(规范化值, 质心)]
     format_errors = []  # 缺位类报错（优先级4）
+    mangled = False     # 组内是否存在残缺箱号标签
     for lab, cen in group:
         cat, norm = classify_label(lab)
         if cat in ('badnum', 'unrecognized'):
             detail = '存在空标签' if not lab else f'标签"{lab}"格式或位数无法识别'
             format_errors.append(('箱号位数缺失', detail))
+            # 字母数字混在一起又拼不成完整箱号的，多半是整体标签少打/多打了位
+            if any(c.isalpha() for c in lab) and any(c.isdigit() for c in lab):
+                mangled = True
         else:
             cat_items.setdefault(cat, []).append((norm, cen))
-    # 无箱号主体的组：只有校验位/箱型/格式错标签 → 孤立标注，整组忽略
+    # 无箱号主体的组：只有校验位/箱型/格式错标签 → 孤立标注，整组忽略；
+    # 但含残缺箱号的组必须把格式错误报出去，不能跟着一起忽略
     if not (cat_items.get('owner') or cat_items.get('serial')
             or cat_items.get('full')):
-        return None
+        if not mangled:
+            return None
+        return ([], sorted({v for v, _ in cat_items.get('type', [])}),
+                [], format_errors)
 
     # ---- 组内配对（供组装箱号使用）----
     # 同类别内按质心距离贪心两两配对（同组标签对应同一箱子的上面&侧面，位置相近）：
@@ -635,17 +648,18 @@ def check_json(path, cfg, stop_event=None):
         return dedupe_errors(suffix_labels) if cfg['suffix'] else []
 
     # ---- 优先级3：危险标（信息性输出，不阻断该文件的其他检测）----
-    # 类别框外的单字符标签（质心超出所有类别框的容差范围）判为危险标：
+    # 类别框外的数字 "0" 标签（质心超出所有类别框的容差范围）判为危险标：
     # 危险标独立标注在类别框外（如 LEFT_SEA_GATE 中的 "0"），形状不限
-    # 矩形/多边形；相邻箱喷字是多字符标签，不会被误判；校验位是单字符
-    # 但质心在类别框内，也不受影响。无类别框时无法判定框内外，不检测
+    # 矩形/多边形。按现场约定只认数字 0，其他单字符（数字/字母）不算
+    # 危险标；相邻箱喷字是多字符标签，不会被误判；校验位虽是单字符但
+    # 质心在类别框内，也不受影响。无类别框时无法判定框内外，不检测
     danger_errors = []
     if cfg['danger'] and category_boxes:
         width = data.get('imageWidth')
         width = width if isinstance(width, (int, float)) and width > 0 else 1920
         tol = round(width * CATEGORY_TOL_RATIO)
         marks = [lab for lab, cen in items
-                 if len(lab) == 1
+                 if lab == '0'
                  and all(dist_outside(cen, b) > tol for b in category_boxes)]
         if marks:
             listed = '、'.join(f'"{m}"' for m in marks)
@@ -814,7 +828,7 @@ CACHE_PATH = os.path.join(app_dir(), '检测结果缓存.json')
 
 # 检测逻辑版本：缓存指纹只含配置内容，检测代码的判定逻辑改动不会体现在
 # 文件的修改时间/大小里，改动判定逻辑时把此号 +1，旧缓存全部失效自动全量重检
-LOGIC_VERSION = 6
+LOGIC_VERSION = 7
 
 
 def valid_cache_entry(v):
@@ -1251,7 +1265,7 @@ PROGRESS_EVERY = 500
 CHECK_ITEMS = [
     ('pairing',   'jpg/json 文件对应检测'),
     ('suffix',    '_fz/_oc 后缀检测（关闭时含此类标签的文件直接跳过）'),
-    ('danger',    '危险标检测（类别框外单字符标签判为危险标，信息性输出，不阻断其他检测）'),
+    ('danger',    '危险标检测（类别框外的数字0判为危险标，信息性输出，不阻断其他检测）'),
     ('pair',      '标签一致性检测（箱号差1~2位且校验位相同才报不一致并给修改意见；校验位不同按不同箱子独立检测）'),
     ('digits',    '箱号缺位/位数检测'),
     ('ownercode', '箱主代码检测（前3位对BIC注册表，第4位限U/J/Z，校验位通过时未注册自动入库）'),
